@@ -1,0 +1,14 @@
+# Data: ~1 GB (chem_prop.tsv alone is 772 MB). Never commit.
+data/
+results/
+
+# API keys
+.env
+
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+.vscode/
+.DS_Store
