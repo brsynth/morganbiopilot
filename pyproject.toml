@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "morganbiopilot"
+version = "0.1"
+requires-python = ">=3.11"
+
+# Versions are pinned in environment.yml (rdkit must stay identical to the
+# morganrxn env: see CLAUDE.md). They are not restated here, to avoid two
+# sources of truth drifting apart.
+dependencies = [
+    "rdkit",
+    "numpy",
+    "scipy",
+    "pandas",
+    "networkx",
+    "scikit-learn",
+    "anthropic",
+    "openai",
+    "python-dotenv",
+    "tqdm",
+    "joblib",
+    "ipython",   # de facto dependency of morganrxn.core.reaction_utils
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

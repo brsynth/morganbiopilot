@@ -1,0 +1,49 @@
+name: morganbiopilot
+
+# Environment for MorganBioPilot (agentic retrobiosynthesis).
+#
+# Setup:
+#   conda env create -f environment.yml
+#   conda activate morganbiopilot
+#   pip install -e .
+#   pip install -e ../../RetroMorgan/morganrxn
+#
+# rdkit is pinned to the exact version used by the `morganrxn` env: counted ECFP
+# fingerprints must be bit-for-bit identical across both projects, otherwise the
+# ECFP templates and the applicability criterion of Meyer et al. 2026 are no
+# longer comparable.
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pip
+
+  - pip:
+      # --- chemistry / core of the deterministic expansion engine ---
+      - rdkit==2026.3.3      # same version as the morganrxn env (see note above)
+      - numpy==2.4.6
+      - scipy==1.17.1
+      - pandas==3.0.3
+      - networkx==3.6.1      # AND-OR tree, target -> sink
+      - scikit-learn==1.9.0  # reuse of the EC classifiers from the paper
+      - ipython              # de facto morganrxn dependency: core.reaction_utils
+                             # imports core.visualization, which imports
+                             # IPython.display. Without ipython the expansion
+                             # engine cannot even be imported.
+
+      # --- LLM policy (model selection decided separately) ---
+      - anthropic            # closed frontier model
+      - openai               # OpenAI-compatible endpoints: open-weights via
+                             # OpenRouter / Together / local vLLM
+
+      # --- tooling ---
+      - python-dotenv        # keep API keys out of the repository
+      - tqdm
+      - joblib               # parallel expansions / baselines
+      - pytest               # the deterministic engine must be tested
+
+      # --- paper figures ---
+      - matplotlib
+      - seaborn
