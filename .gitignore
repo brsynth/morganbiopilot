@@ -1,6 +1,17 @@
 # Data: ~1 GB (chem_prop.tsv alone is 772 MB). Never commit.
 data/
 results/
+logs/
+
+# Cluster job scripts: paths, accounts and partitions are specific to one machine.
+slurms/
+
+# Fitted models. Reproducible from the training entry point that produced them --
+# `python -m morganbiopilot.data_processing.enzymatic_model` writes
+# models/enzymatic_score.joblib and records its own metrics inside the artifact --
+# so the weights are not the record, the command is. Note the consequence: a fresh
+# clone cannot run the arms that need a scorer until it has been trained.
+models/
 
 # API keys
 .env
