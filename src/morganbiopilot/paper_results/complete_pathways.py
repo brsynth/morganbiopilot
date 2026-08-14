@@ -59,7 +59,7 @@ from typing import Dict, List, Optional, Tuple
 from rdkit import Chem, RDLogger
 
 from morganbiopilot.core.building_blocks import (
-    building_block_entries, inchikey_skeleton, is_building_block,
+    building_block_entries, is_building_block, skeleton,
 )
 from morganbiopilot.core.chem import sanitize
 from morganbiopilot.core.paths import RESULTS_DIR
@@ -116,16 +116,12 @@ def _labels() -> Dict[str, str]:
 
 @lru_cache(maxsize=100_000)
 def _skeleton(smi: str) -> str:
-    """Connectivity hash of a SMILES — the same key the sink is matched on.
+    """`core.building_blocks.skeleton`, with "" for the unresolvable.
 
-    Route SMILES and `chem_prop` SMILES disagree about protonation: the search
-    carries phenolates (`O=Cc1ccc([O-])cc1`) where MetaNetX stores the neutral
-    acid (`O=Cc1ccc(O)cc1`). Compared as strings they never match, which broke
-    both the reaction choice and the link between consecutive steps. The first
-    InChIKey block ignores charge and tautomer, so it matches what a chemist
-    would call the same compound.
+    This module keys dictionaries on skeletons throughout, so a missing value has
+    to be falsy rather than None.
     """
-    return inchikey_skeleton(sanitize(smi)) or "" if smi else ""
+    return skeleton(smi) or "" if smi else ""
 
 
 @lru_cache(maxsize=100_000)
