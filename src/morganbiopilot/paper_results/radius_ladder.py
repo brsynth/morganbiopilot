@@ -85,7 +85,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--radii", default="5,4,3,2,1",
                         help="descending; r0 is excluded by default because its "
-                             "median 2095 candidates are unrankable (1% top-5)")
+                             "median 2095 candidates are unrankable (1%% top-5)")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
