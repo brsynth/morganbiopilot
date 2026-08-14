@@ -27,7 +27,10 @@ BUILDING_BLOCKS_CSV = BUILDING_BLOCKS_DIR / "sink.csv"
 
 # Cofactors, stripped from reaction sides: freely available, never expanded.
 COFACTORS_DIR = DATA_DIR / "cofactors"
-COFACTORS_TSV = COFACTORS_DIR / "cofactors_metanetx.tsv"
+# Named as in RetroRules 2026 rather than after the database it was drawn from: the
+# list is a property of the biochemistry, and the shared name keeps the two projects
+# from drifting into two slightly different sets of cofactors.
+COFACTORS_TSV = COFACTORS_DIR / "cofactors_biochem.tsv"
 
 # 20 curated pathways (Koch et al. 2020) — the evaluation set.
 GOLDEN_DATASET_DIR = DATA_DIR / "golden_dataset_pathways"
