@@ -41,18 +41,13 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from morganbiopilot.core.building_blocks import inchikey_skeleton
+from morganbiopilot.core.building_blocks import skeleton as _skeleton
 from morganbiopilot.core.chem import sanitize
 from morganbiopilot.core.golden_dataset import load_golden_dataset
 from morganbiopilot.core.rules import load_rules
 from morganbiopilot.multi_step.heuristics import SinkCloseness
 from morganbiopilot.one_step.expand import expand
 from morganbiopilot.one_step.prefilter import prefilter_from_rules
-
-
-def _skeleton(smiles: str) -> Optional[str]:
-    flat = sanitize(smiles)
-    return inchikey_skeleton(flat) if flat else None
 
 
 def reference_steps(pathways) -> List[Tuple[str, str, str]]:
