@@ -15,7 +15,7 @@ This is the right key here for two independent reasons:
   canonical SMILES would miss them and silently fail to reach the sink.
 
 `data/building_blocks/sink.csv` gives Name + InChI; `data/cofactors/
-cofactors_metanetx.tsv` gives INCHI_PREFIX + INCHIKEY_PREFIX + NAME.
+cofactors_biochem.tsv` gives INCHI_PREFIX + INCHIKEY_PREFIX + NAME.
 """
 
 from functools import lru_cache
@@ -45,6 +45,22 @@ def inchikey_skeleton(smi: str) -> Optional[str]:
     except Exception:
         return None
     return key.split("-")[0] if key else None
+
+
+def skeleton(smi: str) -> Optional[str]:
+    """Sanitize, then take the connectivity hash. The key everything is matched on.
+
+    Route SMILES and `chem_prop` SMILES disagree about protonation: the search carries
+    phenolates (`O=Cc1ccc([O-])cc1`) where MetaNetX stores the neutral acid
+    (`O=Cc1ccc(O)cc1`). Compared as strings they never match, which once broke every
+    completion lookup silently. The first InChIKey block ignores charge and tautomer, so
+    it matches what a chemist would call the same compound.
+
+    Three modules had grown their own copy of this two-line composition; a shared one
+    keeps the sink, the completion and the route replay agreeing on molecule identity.
+    """
+    flat = sanitize(smi)
+    return inchikey_skeleton(flat) if flat else None
 
 
 def _skeleton_from_inchi(inchi: str) -> Optional[str]:
