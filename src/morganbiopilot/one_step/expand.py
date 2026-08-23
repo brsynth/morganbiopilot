@@ -46,12 +46,18 @@ class Neighbour:
     so this is an AND-node.
     """
 
-    rule_idx: int
+    rule_idx: int                        # first rule yielding this molecule set
     molecules: tuple                     # sanitized, mono-component SMILES
     template: str = ""
     reaction_id: str = ""
     cofactors_removed: tuple = ()        # kept for provenance, not for search
-    ec_numbers: tuple = ()               # native EC of the rule; empty ~half the time
+    ec_numbers: tuple = ()               # native EC; merged over `also_rules`
+    # Other rules that produce exactly this molecule set from this substrate. They are
+    # the same disconnection reached by different templates, so they are one node, not
+    # several -- but they are not nothing: their EC annotations are merged into
+    # `ec_numbers`, and their count is what "this disconnection has several precedents"
+    # means.
+    also_rules: tuple = ()
 
     @property
     def ec_classes(self) -> tuple:
@@ -75,6 +81,7 @@ class ExpansionReport:
     n_apply_errors: int = 0
     n_empty_after_cofactors: int = 0     # applications yielding only cofactors
     n_dropped_no_ec: int = 0             # graph-valid but no enzyme behind the rule
+    n_duplicate_outcomes: int = 0        # later rules reaching an already-seen set
     neighbours: List[Neighbour] = field(default_factory=list)
 
     @property
@@ -96,6 +103,8 @@ def expand(
     keep_cofactors: bool = False,
     rule_ec=None,
     require_ec: bool = False,
+    ranker=None,
+    top_n: Optional[int] = None,
 ) -> ExpansionReport:
     """Expand one mono-component molecule into its validated neighbour sets.
 
@@ -120,6 +129,16 @@ def expand(
     The cap is arbitrary by construction — there is no rule ranking in this project
     — so anything but None makes the expansion incomplete in a way that must be
     reported. Leave it None for exact behaviour.
+
+    `ranker` and `top_n` are the principled version of that cap (`one_step.ranking`).
+    The ranker orders the prefiltered rules *before* RDKit validation, and `top_n`
+    stops once that many neighbours exist — so the expensive validation is paid only
+    on the candidates most likely to matter, and the frontier stops growing by
+    hundreds per expansion. Both must be set, and like `require_ec` this is a property
+    of the **environment**: every policy then explores the same graph, which is what
+    makes the paper's comparison mean anything. Measured cost: at r2 a top-10 cut under
+    `native_similarity` keeps 88% of attested disconnections against 65% for rule-index
+    order, and coverage is a per-step figure that compounds along a route.
     """
     target = sanitize(target)
     report = ExpansionReport(target=target)
@@ -136,10 +155,26 @@ def expand(
         # but arbitrary truncation. Report it whenever it is used.
         rule_idxs = rule_idxs[:max_rules]
 
+    # Ordering happens before the loop so `top_n` can stop it early; the ranker sees
+    # only the query and the rules' native substrates, never the products, which is
+    # exactly what lets it run ahead of validation.
+    if ranker is not None:
+        rule_idxs = ranker.order(target, rule_idxs)
+
     if require_ec and rule_ec is None:
         raise ValueError("require_ec=True needs rule_ec (see core.ec.annotate_rules)")
 
+    # Keyed by molecule set: two templates that turn this substrate into the same
+    # precursors are one disconnection. Left undeduplicated they became two reaction
+    # nodes in the search graph, inflating `n_reactions` and `n_routes`, and each one
+    # spent a slot of `top_n` -- so a cap of twenty could buy fewer than twenty
+    # distinct options. Insertion order is the ranker's order, so the first occurrence
+    # is the best-ranked rule and stays the node's representative.
+    by_outcome: "dict[tuple, dict]" = {}
+
     for rule_idx in rule_idxs:
+        if top_n is not None and len(by_outcome) >= top_n:
+            break
         rule_idx = int(rule_idx)
 
         if require_ec and not rule_ec.ec[rule_idx]:
@@ -180,15 +215,42 @@ def expand(
                 report.n_empty_after_cofactors += 1
                 continue
 
-            report.neighbours.append(
-                Neighbour(
-                    rule_idx=rule_idx,
-                    molecules=tuple(sorted(kept)),
-                    template=template,
-                    reaction_id=str(rules.reaction_id[rule_idx]),
-                    cofactors_removed=tuple(sorted(removed)),
-                    ec_numbers=rule_ec.ec[rule_idx] if rule_ec is not None else (),
-                )
-            )
+            key = tuple(sorted(kept))
+            ecs = rule_ec.ec[rule_idx] if rule_ec is not None else ()
+            seen = by_outcome.get(key)
+            if seen is not None:
+                report.n_duplicate_outcomes += 1
+                seen["also"].append(rule_idx)
+                seen["ec"].update(ecs)
+                continue
 
+            by_outcome[key] = {
+                "rule_idx": rule_idx,
+                "template": template,
+                "reaction_id": str(rules.reaction_id[rule_idx]),
+                "removed": tuple(sorted(removed)),
+                "ec": set(ecs),
+                "also": [],
+            }
+
+    # The guard above is checked once per *rule*, but one rule can emit several product
+    # sets, so the count still overshoots: measured on 200 expansions at top_n=20, 14%
+    # exceeded the cap -- usually by one, once by 23. "Capped at 20" has to mean twenty,
+    # and the surplus is taken from the tail so the best-ranked rules are the ones kept.
+    outcomes = list(by_outcome.items())
+    if top_n is not None:
+        outcomes = outcomes[:top_n]
+
+    report.neighbours = [
+        Neighbour(
+            rule_idx=v["rule_idx"],
+            molecules=key,
+            template=v["template"],
+            reaction_id=v["reaction_id"],
+            cofactors_removed=v["removed"],
+            ec_numbers=tuple(sorted(v["ec"])),
+            also_rules=tuple(v["also"]),
+        )
+        for key, v in outcomes
+    ]
     return report

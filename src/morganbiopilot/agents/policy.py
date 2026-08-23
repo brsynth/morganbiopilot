@@ -164,6 +164,12 @@ class LLMCall:
     elapsed_s: float = 0.0
     fallback: str = ""      # non-empty when the model's answer could not be used
     called_api: bool = True  # False when the decision was made without asking
+    # The state exactly as the model saw it, kept only when `record_prompts` is on.
+    # Rejection-sampling fine-tuning turns successful episodes into training pairs, and
+    # a pair is only usable if its prompt is byte-for-byte what inference will produce
+    # -- re-rendering it afterwards is impossible, because the frontier view depends on
+    # the graph at that instant and the graph has moved on.
+    prompt: str = ""
 
     @property
     def is_failure(self) -> bool:
@@ -192,8 +198,22 @@ class LLMPolicy:
         explain: bool = True,
         client=None,
         server_side_fallback: bool = True,
+        record_prompts: bool = False,
+        ranker=None,
+        prefilter=None,
     ):
+        # `ranker` and `prefilter` are what the "portfolio" frontier order needs. They
+        # are not tools: the agent never sees them, they decide which twenty molecules
+        # it is shown. That is a property of the environment, and every arm -- prompted,
+        # fine-tuned, and the classical baselines through their own frontier -- must
+        # face the same one or the comparison measures the view, not the policy.
+        self.ranker = ranker
+        self.prefilter = prefilter
         self.tools = tools
+        # Off by default: a 150-expansion run would otherwise hold 150 prompts of a
+        # thousand tokens each, times however many runs a worker pool has in flight.
+        # Only the episode generator for rejection sampling needs them.
+        self.record_prompts = bool(record_prompts)
         # Built once: it is identical at every decision, and a stable prefix is
         # what makes prompt caching possible on backends that offer it.
         self.explain = bool(explain)
@@ -266,6 +286,7 @@ class LLMPolicy:
             top_k=self.top_k, order=self.order, seed=self.seed,
             closeness=self.tools.closeness, rule_ec=self.tools.rule_ec,
             plausibility=self.tools.plausibility,
+            ranker=self.ranker, prefilter=self.prefilter,
         )
 
         if len(view.candidates) == 1:
@@ -284,6 +305,7 @@ class LLMPolicy:
         record = LLMCall(
             step=self._step, n_candidates=len(view.candidates),
             n_frontier=view.n_total, choice=None, smiles="",
+            prompt=prompt if self.record_prompts else "",
         )
 
         try:

@@ -51,11 +51,17 @@ class Observing:
     is computed at every step purely to ask whether its choice was visible.
     """
 
-    def __init__(self, inner, top_k: int, closeness=None, rule_ec=None):
+    def __init__(self, inner, top_k: int, closeness=None, rule_ec=None,
+                 ranker=None, prefilter=None):
         self.inner = inner
         self.top_k = top_k
         self.closeness = closeness
         self.rule_ec = rule_ec
+        # Without these the view falls back to `_stratify` while the default order is
+        # "portfolio", so this audit would report on a frontier the agent no longer
+        # sees -- the one failure mode an audit must not have.
+        self.ranker = ranker
+        self.prefilter = prefilter
         self.rows: List[dict] = []
 
     @property
@@ -67,6 +73,7 @@ class Observing:
         view = build_frontier_view(
             graph, frontier, top_k=self.top_k,
             closeness=self.closeness, rule_ec=self.rule_ec,
+            ranker=self.ranker, prefilter=self.prefilter,
         )
         shown = {c.node_id for c in view.candidates}
         self.rows.append({

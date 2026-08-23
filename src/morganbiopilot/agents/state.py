@@ -54,8 +54,10 @@ from typing import Dict, List, Optional, Sequence
 
 from morganbiopilot.multi_step.graph import SearchGraph
 
-FRONTIER_ORDERS = ("stratified", "discovery", "seeded_random")
-DEFAULT_FRONTIER_ORDER = "stratified"
+FRONTIER_ORDERS = ("portfolio", "stratified", "discovery", "seeded_random")
+# "portfolio" needs a ranker and a prefilter; without them `build_frontier_view` falls
+# back to "stratified", so the old behaviour is what a caller that passes nothing gets.
+DEFAULT_FRONTIER_ORDER = "portfolio"
 
 # How many frontier molecules the agent is shown per decision.
 #
@@ -110,6 +112,96 @@ def _stratify(graph: SearchGraph, ids: Sequence[int], top_k: int) -> List[int]:
         if not progressed:
             break      # frontier exhausted before top_k
     return chosen
+
+
+def _interleave(orders, ids):
+    """Round-robin across several orderings, first occurrence wins, then the rest."""
+    out, seen = [], set()
+    for rank in range(max((len(o) for o in orders), default=0)):
+        for order in orders:
+            if rank < len(order) and order[rank] not in seen:
+                seen.add(order[rank])
+                out.append(order[rank])
+    out.extend(i for i in ids if i not in seen)
+    return out
+
+
+# Per-molecule scores for the portfolio view, keyed by SMILES. A frontier molecule is
+# re-examined at every subsequent step, so without this the view costs
+# O(steps x frontier) prefilter passes instead of O(distinct molecules): a 30-route
+# replay probe ran past ten minutes where the whole 12,251-route corpus took eighty.
+# `GreedySimilarity` caches the same quantity for the same reason.
+_PORTFOLIO_CACHE: Dict[str, tuple] = {}
+
+
+def _portfolio_scores(smi, ranker, prefilter, rule_ec):
+    """(similarity, precedent, heavy_atoms) for one molecule, computed once."""
+    hit = _PORTFOLIO_CACHE.get(smi)
+    if hit is not None:
+        return hit
+
+    import numpy as np
+    from rdkit import Chem
+
+    from morganbiopilot.core.chem import mol_ecfp
+
+    sim, prec = 0.0, 0
+    try:
+        ecfp = np.asarray(mol_ecfp(smi, prefilter.radius), dtype=np.int32)
+        _vecs, idxs = prefilter.one_step(ecfp)
+        ordered = ranker.order(smi, idxs)
+        if len(ordered):
+            sim = ranker.similarity(smi, int(ordered[0]))
+        if rule_ec is not None and len(idxs):
+            prec = int(max((int(rule_ec.n_reactions[int(j)]) for j in idxs), default=0))
+    except Exception:                                            # noqa: BLE001
+        # One unparseable molecule must not sink the view; it scores last on these two
+        # members and still reaches the agent through `_stratify`.
+        pass
+
+    m = Chem.MolFromSmiles(smi)
+    out = (sim, prec, m.GetNumHeavyAtoms() if m else 10 ** 6)
+    _PORTFOLIO_CACHE[smi] = out
+    return out
+
+
+def _portfolio(graph, ids, top_k, ranker, prefilter, rule_ec=None):
+    """Depth diversity, chemical resemblance, precedent and size, round-robin.
+
+    Each member contributes its few confident picks instead of imposing its ranking.
+    Measured on 3,821 states whose frontier exceeds twenty, replaying attested routes:
+    the on-route molecule survives a top-20 view 84% of the time here against 80% for
+    `_stratify` alone -- 4.6 sigma, and the same ordering leads at every k from 10 to
+    160. No single scorer beat `_stratify`; similarity alone reached 79%.
+
+    Why a portfolio rather than the best scorer. `_stratify` wins among single
+    orderings precisely because it refuses to concentrate: it guarantees a
+    representative of every depth. A pure sort by similarity fills the twenty slots
+    from whichever depth happens to score high and drops the answer when it sits
+    elsewhere. Molecular size is the clearest case -- worst of the four on its own at
+    66%, yet adding it to the other three buys two points, because the picks it is
+    confident about are ones they miss.
+    """
+    if prefilter.radius is None:
+        # Fingerprinting a query at the wrong radius yields a vector that matches
+        # nothing, and every similarity would come back 0.0 -- a portfolio silently
+        # degraded to two of its four members. Refuse instead.
+        raise ValueError("the prefilter carries no radius; rebuild it with "
+                         "prefilter_from_rules so the portfolio can fingerprint")
+
+    sim, prec, heavy = {}, {}, {}
+    for i in ids:
+        smi = graph.molecules[i].smiles
+        sim[i], prec[i], heavy[i] = _portfolio_scores(smi, ranker, prefilter, rule_ec)
+
+    def by(key, reverse=True):
+        return sorted(ids, key=lambda n: (-key(n) if reverse else key(n), n))
+
+    members = [_stratify(graph, ids, len(ids)),
+               by(lambda n: sim[n]),
+               by(lambda n: prec[n]),
+               by(lambda n: heavy[n], reverse=False)]
+    return _interleave(members, ids)[:top_k]
 
 
 @dataclass(frozen=True)
@@ -190,6 +282,8 @@ def build_frontier_view(
     rule_ec=None,
     plausibility=None,
     shuffle: bool = True,
+    ranker=None,
+    prefilter=None,
 ) -> FrontierView:
     """Select and render the frontier molecules the agent will choose among.
 
@@ -202,7 +296,13 @@ def build_frontier_view(
         raise ValueError(f"order must be one of {FRONTIER_ORDERS}, got {order!r}")
 
     ids = list(frontier)
-    if order == "stratified":
+    if order == "portfolio" and ranker is not None and prefilter is not None:
+        chosen = _portfolio(graph, ids, top_k, ranker, prefilter, rule_ec)
+    elif order == "portfolio" or order == "stratified":
+        # No ranker: the portfolio has nothing to interleave, so this is `_stratify`.
+        # Silent rather than an error, because every caller that never ordered the
+        # frontier keeps working -- and `_stratify` is the ordering the portfolio was
+        # measured against, so the fallback is the documented baseline, not a surprise.
         chosen = _stratify(graph, ids, top_k)
     elif order == "discovery":
         ids.sort()          # node ids are assigned in insertion order

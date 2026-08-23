@@ -20,10 +20,11 @@ Two things worth keeping in the record beyond the chemistry:
 
 import json
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from morganbiopilot.core.building_blocks import building_block_entries
+from morganbiopilot.core.building_blocks import building_block_entries, skeleton
 from morganbiopilot.multi_step.graph import SearchGraph
 
 
@@ -91,17 +92,40 @@ class Route:
         }
 
 
+@lru_cache(maxsize=1)
 def _labels() -> Dict[str, str]:
-    return {smi: label for smi, label in building_block_entries()}
+    """Chassis metabolite names, keyed on InChIKey skeleton rather than on SMILES.
+
+    The search carries zwitterions where the sink table stores neutral forms, so an
+    exact SMILES lookup silently misses and every leaf renders as
+    `[NH3+]C(Cc1ccccc1)C(=O)[O-]` instead of "L-phenylalanine". Skeletons ignore charge
+    and tautomer, which is what makes the two agree.
+
+    Cached: it fingerprints the whole 753-metabolite sink, and that is a one-off cost
+    nobody should pay per route.
+    """
+    out: Dict[str, str] = {}
+    for smi, label in building_block_entries():
+        sk = skeleton(smi)
+        if sk:
+            out.setdefault(sk, label)
+    return out
 
 
-def extract_routes(result, rule_ec=None, max_routes: int = 20) -> List[Route]:
-    """Resolve a `SearchResult`'s solved pathways into `Route` objects."""
+def extract_routes(result, rule_ec=None, max_routes: int = 20,
+                   max_pathways: int = 256) -> List[Route]:
+    """Resolve a `SearchResult`'s solved pathways into `Route` objects.
+
+    `max_routes` caps what is returned; `max_pathways` caps the enumeration itself and
+    is forwarded to `SearchGraph.pathways`. They are separate because top-k route
+    recovery needs a wide enumeration and only then a cap, whereas the per-run tables
+    need two or three routes and should not pay for the cartesian product.
+    """
     graph: SearchGraph = result.graph
     labels = _labels()
     routes: List[Route] = []
 
-    for rxn_ids in result.pathways()[:max_routes]:
+    for rxn_ids in graph.pathways(max_routes=max_pathways)[:max_routes]:
         steps, leaves, cofactor_leaves = [], [], []
         molecules_in_route = set()
 
@@ -112,8 +136,12 @@ def extract_routes(result, rule_ec=None, max_routes: int = 20) -> List[Route]:
             molecules_in_route.add(parent.smiles)
             molecules_in_route.update(precursors)
 
-            ec = ()
-            if rule_ec is not None:
+            # The neighbour's annotation first: `expand` folds every template that
+            # reaches the same molecule set into one node and merges their EC, so
+            # `rule_ec[rxn.rule_idx]` would report only the representative rule's and
+            # call a step unannotated when a folded-in template carries the enzyme.
+            ec = tuple(rxn.neighbour.ec_numbers)
+            if not ec and rule_ec is not None:
                 ec = tuple(rule_ec.ec[rxn.rule_idx])
 
             steps.append(RouteStep(
@@ -134,7 +162,7 @@ def extract_routes(result, rule_ec=None, max_routes: int = 20) -> List[Route]:
                 continue
             node = graph.molecules[node_id]
             if node.in_sink:
-                leaves.append((smiles, labels.get(smiles, smiles)))
+                leaves.append((smiles, labels.get(skeleton(smiles) or "", smiles)))
             elif node.is_cofactor:
                 cofactor_leaves.append(smiles)
 

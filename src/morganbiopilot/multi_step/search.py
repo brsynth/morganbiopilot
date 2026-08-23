@@ -12,7 +12,7 @@ means the same thing for a 5 ms greedy step and a 3 s LLM call.
 
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from morganbiopilot.core.chem import sanitize
 from morganbiopilot.multi_step.graph import SearchGraph
@@ -63,12 +63,39 @@ def search(
     stop_on_first_pathway: bool = True,
     rule_ec=None,
     require_ec: bool = False,
+    max_seconds: Optional[float] = None,
+    on_decision: Optional[Callable[[dict], None]] = None,
+    ranker=None,
+    top_n: Optional[int] = None,
 ) -> SearchResult:
     """Search for routes from `target` down to the chassis sink.
 
     `budget` is the number of node expansions — the comparison axis. `max_depth`
     of 0 means unlimited. Set `stop_on_first_pathway=False` to keep spending the
     budget after the first route, e.g. for top-k recovery.
+
+    `max_seconds` bounds a single run in wall-clock and reports
+    `stopped_because == "time"`. It is a defensive bound, not a tuned one: with
+    `stop_on_first_pathway=False`, search cost across the 20 golden targets at budget
+    50 measured 6-48 s (mean 19 s), yet one probe at budget 60 on 14-Butanediol had
+    not returned after ten minutes and the cause was never established. A job that
+    cannot be bounded cannot be scheduled, so the option exists — but leave it None,
+    the default, for every measurement on the expansion axis, where a time cut-off
+    would silently make the budget mean something different per target.
+
+    `on_decision` is called with each decision row as it is produced. The rows already
+    accumulate in `result.decisions`, but only a caller that waits for the return ever
+    sees them; showing a search as it runs needs them one at a time. It runs on the
+    search thread, so it must be cheap and must not raise — anything slower than the
+    expansion itself would change what the timing columns measure.
+
+    `ranker` and `top_n` cap each expansion (`one_step.ranking`). They are a property of
+    the **environment**, not of the policy: set them once and every arm explores the
+    same graph, which is the only way the comparison between arms means anything. Both
+    or neither. Measured at r1 with `native_similarity` and 20: 8 of the 20 attested
+    routes stay reproducible against 6 at r2 uncapped, and the median expansion drops
+    from 96 candidates to 20 — the branching that otherwise leaves UCT stuck at depth 1
+    and shows a language-model policy 0.13% of its frontier.
     """
     target = sanitize(target)
     graph = SearchGraph(target)
@@ -84,6 +111,11 @@ def search(
     t0 = time.perf_counter()
 
     while result.n_expansions < budget:
+        # Checked before the expansion, not after: `expand` is the expensive call and
+        # overshooting the limit by one of them is what the limit is there to prevent.
+        if max_seconds is not None and time.perf_counter() - t0 > max_seconds:
+            result.stopped_because = "time"
+            break
         frontier = graph.frontier()
         if max_depth > 0:
             frontier = [i for i in frontier if graph.molecules[i].depth < max_depth]
@@ -98,6 +130,7 @@ def search(
             node.smiles, rules, prefilter,
             max_rules=max_rules_per_expansion,
             rule_ec=rule_ec, require_ec=require_ec,
+            ranker=ranker, top_n=top_n,
         )
         node.expanded = True
         result.n_expansions += 1
@@ -118,6 +151,8 @@ def search(
             "n_neighbours": len(report.neighbours),
             "solved_after": graph.solved,
         })
+        if on_decision is not None:
+            on_decision(result.decisions[-1])
 
         if graph.solved and stop_on_first_pathway:
             result.stopped_because = "solved"

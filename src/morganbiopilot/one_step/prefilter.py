@@ -40,7 +40,11 @@ class ReactionCenterPrefilter:
     single representative rule index per distinct child vector.
     """
 
-    def __init__(self, ecfp_reaction_centers, ecfp_reactions):
+    def __init__(self, ecfp_reaction_centers, ecfp_reactions, radius=None):
+        # The radius the vectors were built at. Carried so a caller that holds only the
+        # prefilter can fingerprint a query consistently with it, instead of guessing --
+        # `mol_ecfp(smi, wrong_radius)` produces a vector that silently matches nothing.
+        self.radius = radius
         centers = np.asarray(ecfp_reaction_centers, dtype=np.int32)
         reactions = np.asarray(ecfp_reactions, dtype=np.int32)
 
@@ -99,4 +103,5 @@ class ReactionCenterPrefilter:
 
 def prefilter_from_rules(rules) -> ReactionCenterPrefilter:
     """Build a prefilter from a `ReactionRules` object (see `core.rules`)."""
-    return ReactionCenterPrefilter(rules.ecfp_reaction_center, rules.ecfp_reaction)
+    return ReactionCenterPrefilter(rules.ecfp_reaction_center, rules.ecfp_reaction,
+                                   radius=getattr(rules, "radius", None))

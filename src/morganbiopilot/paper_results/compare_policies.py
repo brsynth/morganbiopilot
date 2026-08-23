@@ -55,8 +55,9 @@ deterministic baselines run.
 
 import argparse
 import csv
+import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -72,6 +73,7 @@ from morganbiopilot.core.rules import load_rules
 from morganbiopilot.core.target_list import load_target_list
 from morganbiopilot.multi_step.heuristics import SinkCloseness
 from morganbiopilot.multi_step.mcts import MCTS
+from morganbiopilot.multi_step.policy import GreedySimilarity  # noqa: F401
 from morganbiopilot.multi_step.policy import (
     BreadthFirst, DepthFirst, GreedyECFP, RandomPolicy,
 )
@@ -79,6 +81,19 @@ from morganbiopilot.multi_step.routes import extract_routes, save_routes
 from morganbiopilot.multi_step.search import search
 from morganbiopilot.one_step.expand import expand
 from morganbiopilot.one_step.prefilter import prefilter_from_rules
+
+
+def first_solved_step(result) -> Optional[int]:
+    """Expansions used when the graph first became solved; None if never.
+
+    Read from the decision trace rather than from the final expansion count, so it
+    means the same thing whether or not the run stopped at the first route.
+    """
+    step = next((d["step"] for d in result.decisions if d["solved_after"]), None)
+    if step is None and result.solved:
+        # Solved before any expansion: the target was already in the sink.
+        return 0
+    return step
 
 
 @dataclass
@@ -129,17 +144,28 @@ def enzymatic_fraction(result, rule_ec) -> float:
     if not shortest:
         return float("nan")
 
+    # The neighbour's merged annotation, not the representative rule's: `expand` folds
+    # templates reaching the same molecule set into one node and unions their EC.
     with_ec = sum(
         1 for rxn_id in shortest
-        if rule_ec.ec[result.graph.reactions[rxn_id].rule_idx]
+        if (result.graph.reactions[rxn_id].neighbour.ec_numbers
+            or rule_ec.ec[result.graph.reactions[rxn_id].rule_idx])
     )
     return with_ec / len(shortest)
 
 
-def build_policies(args, radius: int, rule_ec, seeds) -> List:
+def build_policies(args, radius: int, rule_ec, seeds, rules=None, prefilter=None,
+                   ranker=None) -> List:
     """Factories taking a seed and returning a fresh policy. LLM policies opt-in."""
     closeness = SinkCloseness(radius)
+
+    def greedy_similarity():
+        if ranker is None:
+            raise SystemExit("greedy_similarity needs --ranker native_similarity")
+        return GreedySimilarity(rules, prefilter, ranker)
+
     available = {
+        "greedy_similarity": lambda seed: greedy_similarity(),
         "bfs": lambda seed: BreadthFirst(),
         "dfs": lambda seed: DepthFirst(),
         "random": lambda seed: RandomPolicy(seed=seed),
@@ -156,6 +182,11 @@ def build_policies(args, radius: int, rule_ec, seeds) -> List:
         # targets spends money to reproduce a number we have.
         if not name:
             continue
+        # A results row records the policy under its `name` attribute, which is not
+        # always the key used here: GreedyECFP writes "greedy_ecfp". Reading an arm off
+        # a TSV and rerunning it with the name shown there must work -- it did not, and
+        # cost a job.
+        name = {"greedy_ecfp": "greedy"}.get(name, name)
         if name not in available:
             raise SystemExit(f"unknown policy {name!r}; choose from {sorted(available)}")
         policies.append(available[name])
@@ -236,12 +267,24 @@ def build_policies(args, radius: int, rule_ec, seeds) -> List:
                             tools=s,
                             backend=make_backend(sp, effort=(e if e != "n/a" else "medium")),
                             top_k=args.top_k, seed=seed, explain=x,
+                            # The frontier order is part of the environment; without
+                            # these the view silently falls back to `_stratify`.
+                            ranker=ranker, prefilter=prefilter,
                         )
                     )
     return policies
 
 
-def run(args):
+def output_path(args) -> Path:
+    """Where the table goes. Computed before the run so the crash log can name it."""
+    if args.out:
+        return Path(args.out)
+    return (RESULTS_DIR / "compare_policies" /
+            f"r{args.radius}_b{max(int(b) for b in args.budgets.split(','))}"
+            f"{'_ec' if args.require_ec else ''}.tsv")
+
+
+def run(args, partial_path: Optional[Path] = None):
     # The sink defines what "solved" means, so it must be swapped before anything
     # caches it -- before the rules, before SinkCloseness, before any policy is
     # built. An external benchmark scores against its own available set: running
@@ -300,7 +343,56 @@ def run(args):
         print(f"running {args.workers} concurrent (seed, target) runs\n")
 
     rows: List[Row] = []
-    for make_policy in build_policies(args, args.radius, rule_ec, seeds):
+    # Fieldnames come from the dataclass, not from the first row, so the header is on
+    # disk before any run finishes -- a job killed during its first target still leaves
+    # a readable file.
+    partial_fh = open(partial_path, "w", newline="", encoding="utf-8") if partial_path else None
+    partial = None
+    if partial_fh is not None:
+        partial = csv.DictWriter(partial_fh, fieldnames=[f.name for f in fields(Row)],
+                                 delimiter="\t")
+        partial.writeheader()
+        partial_fh.flush()
+        print(f"streaming rows to {partial_path} as they complete\n")
+
+    decisions_fh = None
+    if partial_path is not None and args.save_decisions:
+        decisions_path = partial_path.with_name(
+            partial_path.name.replace(".partial.tsv", ".decisions.jsonl"))
+        # LF everywhere: see route_corpus for why this is not cosmetic.
+        decisions_fh = open(decisions_path, "w", encoding="utf-8", newline="\n")
+        print(f"streaming the decision trace to {decisions_path}\n")
+
+    try:
+        # One ranker for every arm: the cap is a property of the environment, so a
+        # policy comparison where the arms saw different graphs would measure nothing.
+        from morganbiopilot.one_step.ranking import make_ranker
+        ranker = make_ranker(args.ranker, rules)
+        if ranker is not None:
+            print(f"expansions ranked by {args.ranker}, capped at {args.top_n}\n")
+        rows = _run_policies(args, rules, rule_ec, prefilter, pathways, names, seeds,
+                             max_budget, expandable, rows, partial, partial_fh, ranker,
+                             prefilter, decisions_fh)
+    finally:
+        if partial_fh is not None:
+            partial_fh.close()
+        if decisions_fh is not None:
+            decisions_fh.close()
+
+    # Completion order is nondeterministic under concurrency, so the table would
+    # otherwise depend on scheduling. Sorting here makes the TSV byte-identical to the
+    # sequential run.
+    rows.sort(key=lambda r: (r.policy, r.seed, r.target))
+    return rows, pathways
+
+
+def _run_policies(args, rules, rule_ec, prefilter, pathways, names, seeds,
+                  max_budget, expandable, rows, partial, partial_fh, ranker=None,
+                  pf=None, decisions_fh=None):
+    """The policy loop, split out of `run` only so the partial file can be closed
+    in a `finally` without indenting the whole body."""
+    for make_policy in build_policies(args, args.radius, rule_ec, seeds,
+                                      rules, pf or prefilter, ranker):
         # A seed only changes two things: the frontier presentation shuffle, which
         # exists solely for the LLM, and `RandomPolicy`'s draw. Breadth-first,
         # depth-first, greedy and MCTS are deterministic functions of the graph, so
@@ -328,14 +420,20 @@ def run(args):
                 budget=max_budget, max_depth=args.max_depth,
                 rule_ec=rule_ec, require_ec=args.require_ec,
                 stop_on_first_pathway=not args.exhaustive,
+                ranker=ranker, top_n=args.top_n,
             )
             row = Row(
                 policy=result.policy, target=name, repeat=repeat, seed=seed,
                 expandable=expandable[name], solved=result.solved,
                 n_expansions=result.n_expansions,
-                # With stop_on_first_pathway the run halts on success, so the
-                # expansion count is the expansions-to-solution.
-                solved_at=result.n_expansions if result.solved else None,
+                # The step at which the graph first became solved, read off the
+                # decision trace. Equal to `n_expansions` under stop_on_first_pathway,
+                # which is the default -- but `--exhaustive` keeps spending the budget
+                # after the first route, and taking the expansion count there would
+                # silently report every solved run as having needed the full budget.
+                # Solve rate at budget B is `solved_at <= B`, so that one substitution
+                # would corrupt every number in the paper without failing anything.
+                solved_at=first_solved_step(result),
                 stopped_because=result.stopped_because,
                 n_molecules=result.n_molecules, n_reactions=result.n_reactions,
                 n_routes=len(result.pathways()),
@@ -360,19 +458,52 @@ def run(args):
         def finish(row, line, routes, result):
             rows.append(row)
             print(line)
+            # Append-and-flush before anything else can fail. Job 1308521 spent 10 h of
+            # L40S on 358 of 360 runs, was cancelled at the wall, and wrote nothing at
+            # all -- the final TSV is written once, after every run returns. The table
+            # only survived because each run had also printed a line, and reconstructing
+            # it from the log lost the seeds. One flushed row per run costs nothing and
+            # makes a killed job a truncated result instead of no result.
+            if partial is not None:
+                partial.writerow(asdict(row))
+                partial_fh.flush()
             if routes is not None:
                 slug = "".join(ch if ch.isalnum() else "_" for ch in result.policy)
+                # The environment belongs in the name, not only in the metadata. Without
+                # it, a second run of the same policy and seed at another radius -- or
+                # at the same radius with a different ranker -- silently overwrote the
+                # first, and neither the name nor `meta` could tell the two apart. The
+                # suffix goes last so that the target prefix and policy substring that
+                # `visualize_routes` filters on still match.
+                env = f"r{args.radius}__" + (f"{args.ranker}{args.top_n}"
+                                             if args.ranker else "raw")
                 save_routes(
                     routes,
                     RESULTS_DIR / "routes"
-                    / f"{row.target}__{slug}__seed{row.seed}.json",
+                    / f"{row.target}__{slug}__seed{row.seed}__{env}.json",
                     meta={"policy": result.policy, "target": row.target,
                           "seed": row.seed, "radius": args.radius,
+                          "ranker": args.ranker, "top_n": args.top_n,
                           "require_ec": args.require_ec,
                           "expansions": result.n_expansions},
                 )
                 if args.print_routes and routes:
                     print(routes[0].render())
+
+            # The decision trace, one line per expansion. `search` builds it and the
+            # docstring calls a run "reconstructible without re-running" -- but nothing
+            # persisted it, so every run recomputed `frontier_size` and threw it away.
+            # That is the quantity the frontier-visibility argument rests on, and it
+            # had to be approximated by graph size for want of this file.
+            if decisions_fh is not None:
+                for d in result.decisions:
+                    decisions_fh.write(json.dumps({
+                        "policy": result.policy, "target": row.target,
+                        "seed": row.seed, "repeat": row.repeat,
+                        "radius": args.radius, "ranker": args.ranker,
+                        "top_n": args.top_n, "top_k": args.top_k, **d,
+                    }) + "\n")
+                decisions_fh.flush()
 
         jobs = [(repeat, seed, name)
                 for repeat, seed in enumerate(policy_seeds) for name in names]
@@ -394,11 +525,7 @@ def run(args):
             for job in jobs:
                 finish(*run_one(job))
 
-    # Completion order is nondeterministic under concurrency, so the table would
-    # otherwise depend on scheduling. Sorting here makes the TSV byte-identical to the
-    # sequential run.
-    rows.sort(key=lambda r: (r.policy, r.seed, r.target))
-    return rows, pathways
+    return rows
 
 
 def _mean_std(values) -> tuple:
@@ -523,6 +650,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "shuffle, so >1 gives error bars on LLM policies")
     p.add_argument("--exhaustive", action="store_true",
                    help="keep spending the budget after the first route")
+    p.add_argument("--ranker", default=None,
+                   help="'native_similarity' orders rules before RDKit validation so "
+                        "--top-n keeps the most promising. Applied to every arm.")
+    p.add_argument("--top-n", type=int, default=None,
+                   help="neighbours kept per expansion; needs --ranker")
     p.add_argument("--llm", action="store_true", help="also run LLM policies (costs money)")
     p.add_argument("--models", default="claude-opus-5")
     p.add_argument("--efforts", default="medium")
@@ -543,6 +675,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--save-routes", action="store_true", default=True,
                    help="write solved pathways to results/routes/*.json")
     p.add_argument("--no-save-routes", dest="save_routes", action="store_false")
+    p.add_argument("--save-decisions", action="store_true", default=True,
+                   help="write one JSONL line per expansion: which node the policy "
+                        "picked, out of how large a frontier, and what it bought")
+    p.add_argument("--no-save-decisions", dest="save_decisions",
+                   action="store_false")
     p.add_argument("--print-routes", action="store_true",
                    help="also print the first route of each solved run")
     return p
@@ -550,23 +687,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    rows, pathways = run(args)
+    out = output_path(args)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    partial_path = out.with_suffix(".partial.tsv")
+
+    rows, pathways = run(args, partial_path=partial_path)
     budgets = sorted(int(b) for b in args.budgets.split(","))
     seeds = [int(x) for x in args.seeds.split(",")]
     summarise(rows, budgets, seeds, pathways, args.require_ec)
-
-    out = Path(args.out) if args.out else (
-        RESULTS_DIR / "compare_policies" /
-        f"r{args.radius}_b{max(int(b) for b in args.budgets.split(','))}"
-        f"{'_ec' if args.require_ec else ''}.tsv"
-    )
-    out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(asdict(rows[0])), delimiter="\t")
         writer.writeheader()
         for row in rows:
             writer.writerow(asdict(row))
     print(f"\nwrote {len(rows)} rows to {out}")
+    # Removed only on success, so a leftover .partial.tsv is exactly the signal that a
+    # job died -- and it holds every run that had completed.
+    partial_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

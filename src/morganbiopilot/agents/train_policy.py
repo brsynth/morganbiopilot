@@ -32,12 +32,13 @@ BioNavi-NP targets, and it can only be measured by running the search
 (`paper_results.compare_policies`). A model can improve next-node accuracy and still
 search worse, because one wrong turn early costs more than several right ones later.
 
-    python -m morganbiopilot.agents.train_policy --pairs results/sft_pairs_andor.jsonl
+    python -m morganbiopilot.agents.train_policy --pairs results/sft_pairs_r1_ranked.jsonl
 """
 
 import argparse
 import json
 import random
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -78,6 +79,102 @@ def subsample(pairs: List[dict], keep_deep: int, limit: int, seed: int) -> List[
     return deep + shallow[:room]
 
 
+TARGET_PREFIX = "Target molecule: "
+
+
+def pair_target(pair: dict) -> str:
+    """The SMILES a pair's decision belongs to. The first line of the user turn."""
+    head = pair["user"].split("\n", 1)[0]
+    return head[len(TARGET_PREFIX):].strip() if head.startswith(TARGET_PREFIX) else head
+
+
+CANDIDATE = re.compile(r"^\[(\d+)\]\s+(\S+)\s+\|")
+
+
+def benchmark_skeletons(targets_files=None, variant: str = "experimental") -> set:
+    """InChIKey skeletons of every evaluation target, across every benchmark."""
+    from morganbiopilot.core.building_blocks import skeleton
+    from morganbiopilot.core.golden_dataset import load_golden_dataset
+
+    banned = set()
+    for gold in load_golden_dataset(variant):
+        sk = skeleton(gold.target)
+        if sk:
+            banned.add(sk)
+    for path in (targets_files or ()):
+        from morganbiopilot.core.target_list import load_target_list
+        for entry in load_target_list(path):
+            sk = skeleton(entry.target)
+            if sk:
+                banned.add(sk)
+    return banned
+
+
+def drop_benchmark_frontiers(pairs: List[dict], banned: set) -> List[dict]:
+    """Drop decisions that even *show* an evaluation target among the candidates.
+
+    Excluding pairs by target closes the obvious leak. It leaves a quieter one: a route
+    mined for some other compound can pass through a benchmark target, and the decision
+    rendered there teaches the model how that molecule is expanded -- or, when it is a
+    distractor, that it should not be. Measured on this corpus, a benchmark target is
+    the chosen molecule in 7.5% of the remaining pairs and appears somewhere in the
+    frontier in 15.5%.
+
+    The strict form is taken because it is free: 23,086 pairs survive it, still above
+    the 20,000 the run subsamples to. A leak worth 15% of a corpus we do not fully use
+    is not worth defending in review.
+    """
+    from morganbiopilot.core.building_blocks import skeleton
+
+    keep = []
+    for pair in pairs:
+        shown = [CANDIDATE.match(line.strip()) for line in pair["user"].split("\n")]
+        skeletons = {skeleton(m.group(2)) for m in shown if m}
+        if skeletons & banned:
+            continue
+        keep.append(pair)
+    print(f"excluded {len(pairs) - len(keep)} further pairs whose frontier showed an "
+          f"evaluation target")
+    return keep
+
+
+def drop_benchmark_targets(pairs: List[dict], targets_files=None,
+                           variant: str = "experimental"):
+    """Remove every pair whose target is an evaluation target.
+
+    This is not a precaution, it is a repair. The corpus was mined from MetaNetX with
+    nothing excluding the benchmarks, and the result was that 10 of the 20 curated
+    targets and 31 of the 60 sampled BioNavi-NP targets reached the training split. The
+    contamination did not turn out to explain the measured gain -- it survived on
+    held-out and never-mined targets alike -- but with half the benchmark inside the
+    training data no measurement on it can settle the question either way.
+
+    Matching is on InChIKey skeleton, not SMILES: the corpus carries phenolates where
+    the benchmarks carry neutral acids, and a string comparison would report a
+    reassuring zero for the wrong reason.
+
+    The cost is negligible -- a few dozen targets out of ~8,300 -- and it is paid before
+    subsampling so the freed budget goes to targets that are still usable.
+    """
+    from morganbiopilot.core.building_blocks import skeleton
+
+    # Several files, because there are several benchmarks and forgetting one is the
+    # exact mistake this function exists to undo: LASER alone contributes 35 targets
+    # that were in the contaminated training split.
+    banned = benchmark_skeletons(targets_files, variant)
+
+    keep, dropped = [], set()
+    for pair in pairs:
+        sk = skeleton(pair_target(pair))
+        if sk is not None and sk in banned:
+            dropped.add(sk)
+            continue
+        keep.append(pair)
+    print(f"excluded {len(pairs) - len(keep)} pairs from {len(dropped)} evaluation "
+          f"targets ({len(banned)} benchmark skeletons checked)")
+    return keep
+
+
 def split_by_target(pairs: List[dict], fraction: float, seed: int):
     """Hold out whole targets, so no target appears on both sides."""
     targets = sorted({pair["user"].split("\n", 1)[0] for pair in pairs})
@@ -105,7 +202,10 @@ def as_conversation(pair: dict) -> Dict[str, list]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--pairs", default="results/sft_pairs_andor.jsonl")
+    # The current replayed corpus. The previous default was the andor-era file, which
+    # a bare run would have trained on without saying so -- a silently stale corpus is
+    # worse than a missing one.
+    parser.add_argument("--pairs", default="results/sft_pairs_r1_ranked.jsonl")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--out", default="models/policy_sft")
     parser.add_argument("--epochs", type=float, default=2.0)
@@ -125,11 +225,36 @@ def main() -> int:
                              "shallow decisions, see `subsample`")
     parser.add_argument("--keep-deep", type=int, default=3,
                         help="depth at or above which every decision is kept")
+    parser.add_argument("--save-steps", type=int, default=150,
+                        help="checkpoint every N optimiser steps. At ~15 s/step this "
+                             "caps the loss from a dead job at about 40 minutes")
+    parser.add_argument("--resume", action="store_true",
+                        help="continue from the last checkpoint in --out")
     parser.add_argument("--holdout", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--eval-targets",
+                        default="data/bionavinp/testset.txt,"
+                                "data/laser_dataset/laser_targets.tsv",
+                        help="comma-separated target lists to exclude from training, "
+                             "alongside the 20 curated pathways; '' disables it")
+    parser.add_argument("--leak-level", default="frontier",
+                        choices=("target", "frontier"),
+                        help="'target' drops pairs whose target is an evaluation "
+                             "target; 'frontier' also drops any decision that showed "
+                             "one among its candidates (default, and effectively free)")
+    parser.add_argument("--keep-benchmarks", action="store_true",
+                        help="do NOT exclude evaluation targets. Only for reproducing "
+                             "the contaminated run; never for a reported number")
     args = parser.parse_args()
 
     pairs = load_pairs(args.pairs)
+    if not args.keep_benchmarks:
+        files = [f.strip() for f in (args.eval_targets or "").split(",") if f.strip()]
+        pairs = drop_benchmark_targets(pairs, files)
+        if args.leak_level == "frontier":
+            pairs = drop_benchmark_frontiers(pairs, benchmark_skeletons(files))
+    else:
+        print("WARNING: evaluation targets are NOT excluded; this run is contaminated")
     full = len(pairs)
     pairs = subsample(pairs, args.keep_deep, args.max_pairs, args.seed)
     if len(pairs) < full:
@@ -167,7 +292,13 @@ def main() -> int:
         gradient_checkpointing=True,
         logging_steps=25,
         eval_strategy="epoch",
-        save_strategy="epoch",
+        # Checkpoint during the run, not only at the end. With one epoch, "save at the
+        # end of the epoch" means a single save point: a run that dies at step 872 of
+        # 1779 leaves nothing at all, which is what happened and cost 3.5 GPU-hours.
+        # A LoRA adapter at r=16 is tens of megabytes, so the cost of this is noise.
+        save_strategy="steps",
+        save_steps=args.save_steps,
+        save_total_limit=3,
         report_to=[],
         seed=args.seed,
     )
@@ -183,7 +314,10 @@ def main() -> int:
         eval_dataset=sets["validation"],
         peft_config=lora,
     )
-    trainer.train()
+    # Resuming needs the corpus to be identical, which it is: the pairs are subsampled
+    # and split with `--seed`, so the same seed on the same file rebuilds the same
+    # split. Changing --pairs or --seed and resuming would silently mix two datasets.
+    trainer.train(resume_from_checkpoint=args.resume or None)
     trainer.save_model(args.out)
 
     Path(args.out).mkdir(parents=True, exist_ok=True)

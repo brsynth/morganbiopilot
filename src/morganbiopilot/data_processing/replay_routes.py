@@ -38,6 +38,7 @@ import argparse
 import json
 import random
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -65,7 +66,7 @@ def render_user(graph: SearchGraph, view, target: str) -> str:
 
 
 def replay(target: str, tree: Dict[str, int], rules, prefilter, top_k: int,
-           seed: int, max_depth: int) -> tuple:
+           seed: int, max_depth: int, ranker=None, top_n=None, rule_ec=None) -> tuple:
     """(pairs, outcome) for one route tree.
 
     A route is a tree, not a chain: one step can leave two precursors to make and both
@@ -95,7 +96,8 @@ def replay(target: str, tree: Dict[str, int], rules, prefilter, top_k: int,
             outcome = "depth cap"
             break
         try:
-            report = expand(node.smiles, rules, prefilter)
+            report = expand(node.smiles, rules, prefilter,
+                            ranker=ranker, top_n=top_n)
         except Exception:                                        # noqa: BLE001
             outcome = "expansion failed"
             break
@@ -113,7 +115,13 @@ def replay(target: str, tree: Dict[str, int], rules, prefilter, top_k: int,
 
         # Seeded per step so the correct answer does not sit at a fixed position across a
         # trajectory, which the model would learn instead of the chemistry.
-        view = build_frontier_view(graph, frontier, top_k=top_k, seed=seed + len(pairs))
+        # The same view the agent will meet, ranker included. Building the corpus with
+        # a different frontier order than inference uses is the deeper form of the
+        # distribution mismatch this file exists to avoid: the model would be taught to
+        # choose among twenty molecules selected one way and then asked to choose among
+        # twenty selected another.
+        view = build_frontier_view(graph, frontier, top_k=top_k, seed=seed + len(pairs),
+                                   ranker=ranker, prefilter=prefilter, rule_ec=rule_ec)
         visible = [(k, on_route[_skeleton(c.smiles)])
                    for k, c in enumerate(view.candidates)
                    if _skeleton(c.smiles) in on_route]
@@ -161,6 +169,27 @@ def main() -> int:
     parser.add_argument("--max-depth", type=int, default=7)
     parser.add_argument("--limit", type=int, default=0, help="0 = every route")
     parser.add_argument("--seed", type=int, default=0)
+    # Threads buy nothing here and the measurement says so: 60 routes took the same
+    # wall time on 8 workers as on 1, because `ranker.order` is a Python loop and the
+    # GIL serialises it. Processes would work but each holds its own copy of the rule
+    # set. So the unit of parallelism is the *job*: slice the corpus with --offset,
+    # run one job per slice, concatenate. Kept anyway for the case where the expensive
+    # call releases the GIL.
+    parser.add_argument("--workers", type=int, default=1,
+                        help="routes replayed concurrently within one process. Threads, "
+                             "so expect little gain; prefer --offset across jobs")
+    parser.add_argument("--offset", type=int, default=0,
+                        help="skip this many routes before --limit. Slicing happens "
+                             "after the shuffle and each route keeps its own seed, so "
+                             "concatenated slices equal one undivided run")
+    # The cap must match the one the search will run under, or every training state is
+    # drawn from a graph the model will never see again. It belongs to the environment,
+    # so mining (`route_corpus`) stays uncapped -- that builds the oracle -- while the
+    # replay that turns routes into decisions is capped exactly like inference.
+    parser.add_argument("--ranker", default=None,
+                        help="'native_similarity' to order rules before validation")
+    parser.add_argument("--top-n", type=int, default=None,
+                        help="neighbours kept per expansion; needs --ranker")
     args = parser.parse_args()
 
     if args.sink:
@@ -172,16 +201,38 @@ def main() -> int:
     with open(args.routes, encoding="utf-8") as fh:
         for line in fh:
             routes.append(json.loads(line))
-    if args.limit and args.limit < len(routes):
+    # The seed each route is replayed under is its index in this list, so it must be
+    # fixed *before* slicing -- otherwise slice 2 would replay its routes under the
+    # seeds slice 1 used, and concatenating the slices would not equal one whole run.
+    if (args.limit and args.limit < len(routes)) or args.offset:
         # Not `routes[:limit]`: the corpus is written level by level outwards from the
         # sink, so its head is its shallow end and a prefix is not a sample of it.
         random.Random(args.seed).shuffle(routes)
-        routes = routes[:args.limit]
+    indexed = list(enumerate(routes))
+    if args.offset:
+        indexed = indexed[args.offset:]
+    if args.limit:
+        indexed = indexed[:args.limit]
+    routes = indexed
+    if args.offset or args.limit:
+        print(f"slice: routes {routes[0][0]}..{routes[-1][0]} of {len(indexed)}")
     print(f"{len(routes)} routes | radius r{args.radius} | top_k {args.top_k}")
 
     print("loading rules ...")
     rules = load_rules(radius=args.radius)
     prefilter = prefilter_from_rules(rules)
+    from morganbiopilot.one_step.ranking import make_ranker
+    ranker = make_ranker(args.ranker, rules)
+    if ranker is not None:
+        print(f"expansions ranked by {args.ranker}, capped at {args.top_n}")
+
+    # Needed by the portfolio frontier order, which counts a molecule's best-attested
+    # rule among its members. Without it that member is flat and the view degrades to
+    # three of four -- quietly, and differently from the view inference will build.
+    from morganbiopilot.core.ec import annotate_rules
+    rule_ec = annotate_rules(rules)
+    print(f"frontier view: portfolio (depth / similarity / precedent / size), "
+          f"top_k {args.top_k}")
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -189,17 +240,50 @@ def main() -> int:
     by_depth: Counter = Counter()
     emitted = 0
 
-    with open(out, "w", encoding="utf-8") as fh:
-        for i, entry in enumerate(routes):
-            pairs, outcome = replay(entry["target"], entry["tree"], rules, prefilter,
-                                    args.top_k, args.seed + i, args.max_depth)
+    def one(job):
+        """One route, replayed. Pure apart from the shared per-molecule score cache,
+        whose worst case under concurrency is computing an entry twice."""
+        i, entry = job
+        return replay(entry["target"], entry["tree"], rules, prefilter,
+                      args.top_k, args.seed + i, args.max_depth,
+                      ranker, args.top_n, rule_ec)
+
+    # Already (original_index, entry): the index is the route's seed, and it must
+    # survive slicing so that concatenated slices equal one undivided run.
+    jobs = routes
+    t0 = time.perf_counter()
+
+    # LF everywhere: see route_corpus for why this is not cosmetic.
+    with open(out, "w", encoding="utf-8", newline="\n") as fh:
+        def take(pairs, outcome, done):
+            nonlocal emitted
             outcomes[outcome] += 1
             for pair in pairs:
                 by_depth[pair["depth"]] += 1
                 fh.write(json.dumps(pair) + "\n")
                 emitted += 1
-            if (i + 1) % 250 == 0:
-                print(f"  {i + 1}/{len(routes)} routes -> {emitted} pairs", flush=True)
+            if done % 250 == 0:
+                rate = done / max(time.perf_counter() - t0, 1e-9)
+                print(f"  {done}/{len(jobs)} routes -> {emitted} pairs "
+                      f"({rate * 60:.0f}/min, eta {(len(jobs) - done) / rate / 60:.0f} min)",
+                      flush=True)
+
+        if args.workers > 1:
+            # Routes are independent, and the portfolio frontier order made this loop
+            # 22x more expensive than the plain stratified one: 29 h serial against the
+            # 1.3 h it used to take. Threads, not processes, so the score cache is
+            # shared -- and RDKit releases the GIL in the calls that dominate here.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                futures = [pool.submit(one, j) for j in jobs]
+                for done, fut in enumerate(as_completed(futures), 1):
+                    pairs, outcome = fut.result()
+                    take(pairs, outcome, done)
+        else:
+            for done, job in enumerate(jobs, 1):
+                pairs, outcome = one(job)
+                take(pairs, outcome, done)
 
     print()
     print(f"{emitted} pairs from {len(routes)} routes "

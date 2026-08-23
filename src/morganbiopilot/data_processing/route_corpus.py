@@ -8,9 +8,20 @@ the same size as ours. They build their corpus by *searching* a reaction graph, 
 curating routes: 299,202 multi-step routes over USPTO, of which they keep the 11,366
 longer than four steps.
 
-This is the retrobiosynthetic analogue. Molecules are nodes, an edge `m -> m'` exists
-when some balanced MetaNetX reaction has `m` as a product and `m'` as a non-cofactor
-reactant, and a route is a path from a target down to the chassis.
+This is the retrobiosynthetic analogue. Molecules are nodes and a route is a path from
+a target down to the chassis -- but read `build_edges_from_rules` before assuming how
+the edges are made, because it is not what an earlier version of this file did and not
+what "mining MetaNetX" would suggest.
+
+An edge is **a reaction rule applied to the substrate it was extracted from**, not a
+MetaNetX reaction read off the database. The two sound equivalent and are not. Building
+edges from MetaNetX reactions directly gave a graph whose steps our own engine could
+reproduce only 11% of the time, because a reaction and the template extracted from it
+do not always agree on what a molecule decomposes into. Going through the template
+instead makes every edge something `expand` can produce by construction, which is the
+property the replay depends on -- and the chemistry stays attested, since every
+template was extracted from a balanced MetaNetX reaction. What is recovered is which
+substrate-product pair each template encodes, not a new transformation.
 
 Why distances are computed from the sink outwards
 ------------------------------------------------
@@ -232,7 +243,12 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     kept, sizes = 0, []
     rng = random.Random(args.seed)
-    with open(out, "w", encoding="utf-8") as fh:
+    # newline="\n" so the file is byte-identical wherever it is produced. Python's text
+    # mode translates to CRLF on Windows, which left a corpus mined here and the same
+    # corpus mined on the cluster differing by exactly one byte per line -- identical
+    # content, different checksum, and a reproducibility check that fails for a reason
+    # that has nothing to do with chemistry.
+    with open(out, "w", encoding="utf-8", newline="\n") as fh:
         for molecule, d in depth.items():
             if not (args.min_length <= d <= args.max_length):
                 continue
