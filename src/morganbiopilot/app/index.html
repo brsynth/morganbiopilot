@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MorganBioPilot — retrobiosynthetic search</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #fff; --ink: #1b1b19; --muted: #6b6b66;
+    --line: #e3e3df; --accent: #b4552d; --ok: #2f7d52; --warn: #9a6b12;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a; --panel: #1d1d22; --ink: #e8e8e4; --muted: #93938c;
+      --line: #2e2e35; --accent: #e0865c; --ok: #6cc292; --warn: #d6a94a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 18px 24px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { margin: 0; font-size: 17px; font-weight: 620; letter-spacing: -.01em; }
+  header span { color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: 320px 1fr; gap: 0; align-items: start; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+
+  form { padding: 20px 24px; border-right: 1px solid var(--line); }
+  @media (max-width: 900px) { form { border-right: none; border-bottom: 1px solid var(--line); } }
+  label { display: block; margin: 14px 0 5px; font-size: 12px; font-weight: 600;
+          text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  input, select, textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--panel); color: var(--ink); font-size: 14px; font-family: inherit;
+  }
+  textarea { font-family: var(--mono); font-size: 12.5px; resize: vertical; min-height: 62px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .check input { width: auto; }
+  .check label { margin: 0; text-transform: none; letter-spacing: 0; font-size: 13px;
+                 font-weight: 500; color: var(--ink); }
+  button {
+    margin-top: 20px; width: 100%; padding: 10px; border: 0; border-radius: 6px;
+    background: var(--accent); color: #fff; font-size: 14px; font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint { margin-top: 10px; font-size: 12px; color: var(--muted); }
+
+  section { padding: 20px 24px; min-width: 0; }
+  .stats { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 14px; }
+  .stat b { display: block; font-size: 20px; font-weight: 620; }
+  .stat span { font-size: 11.5px; color: var(--muted); text-transform: uppercase;
+               letter-spacing: .04em; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+       color: var(--muted); margin: 22px 0 8px; }
+  #log {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; max-height: 260px; overflow-y: auto;
+    font-family: var(--mono); font-size: 12px; line-height: 1.65;
+  }
+  #log div { white-space: pre; overflow-x: auto; }
+  .muted { color: var(--muted); }
+  .ok { color: var(--ok); font-weight: 600; }
+  .warn { color: var(--warn); }
+  .err { color: var(--accent); white-space: pre-wrap !important; }
+
+  .route { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+           padding: 14px 16px; margin-bottom: 12px; }
+  .route header { padding: 0 0 10px; border: 0; border-bottom: 1px solid var(--line);
+                  margin-bottom: 10px; gap: 10px; }
+  .route h3 { margin: 0; font-size: 14px; font-weight: 620; }
+  .step { padding: 7px 0; border-bottom: 1px dashed var(--line); }
+  .step:last-child { border-bottom: 0; }
+  .smi { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+  .arrow { color: var(--muted); }
+  .ec { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px;
+        background: var(--line); color: var(--muted); margin-left: 6px; }
+  .chassis { margin-top: 10px; font-size: 13px; }
+  .chassis b { font-weight: 600; }
+  .pill { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px;
+          border: 1px solid var(--line); margin: 2px 4px 2px 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>MorganBioPilot</h1>
+  <span>one retrobiosynthetic search, watched as it runs</span>
+</header>
+
+<main>
+  <form id="f">
+    <label for="preset">Curated target</label>
+    <select id="preset"><option value="">— type a SMILES below —</option></select>
+
+    <label for="smiles">Target SMILES</label>
+    <textarea id="smiles" spellcheck="false">O=Cc1ccc(O)c(OC)c1</textarea>
+
+    <label for="policy">Search policy</label>
+    <select id="policy">
+      <option value="bfs">bfs — breadth first</option>
+      <option value="dfs">dfs — depth first</option>
+      <option value="greedy">greedy — closest to the chassis</option>
+      <option value="greedy_similarity">greedy — best-precedented disconnection</option>
+      <option value="mcts" selected>mcts — UCT on sink closeness</option>
+      <option value="random">random</option>
+      <option value="llm">llm — language-model policy</option>
+    </select>
+
+    <div id="modelWrap" style="display:none">
+      <label for="model">Model</label>
+      <input id="model" value="openai:Qwen/Qwen2.5-7B-Instruct" spellcheck="false">
+      <div class="hint">Needs a served model and OPENAI_BASE_URL in the server's env.</div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="radius">ECFP radius</label>
+        <select id="radius">
+          <option value="0">r0 — most general</option>
+          <option value="1">r1</option>
+          <option value="2" selected>r2</option>
+          <option value="3">r3</option>
+          <option value="4">r4</option>
+          <option value="5">r5 — most specific</option>
+        </select>
+      </div>
+      <div>
+        <label for="budget">Budget</label>
+        <input id="budget" type="number" value="50" min="1" max="2000">
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="depth">Max depth</label>
+        <input id="depth" type="number" value="7" min="1" max="20">
+      </div>
+      <div>
+        <label for="seed">Seed</label>
+        <input id="seed" type="number" value="0">
+      </div>
+    </div>
+
+    <div class="check">
+      <input type="checkbox" id="ranked" checked>
+      <label for="ranked">Rank &amp; cap each expansion</label>
+    </div>
+    <div id="topnWrap">
+      <label for="topn">Candidates kept per expansion</label>
+      <input id="topn" type="number" value="20" min="1" max="500">
+      <div class="hint">Ordered by similarity to the substrate each rule was learned
+        on. Uncapped at r1, violacein yields 96 precursor sets and the frontier passes
+        15,000 nodes; UCT then never leaves depth 1.</div>
+    </div>
+
+    <div class="check">
+      <input type="checkbox" id="requireEc">
+      <label for="requireEc">Only rules with a known enzyme (EC)</label>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="exhaustive">
+      <label for="exhaustive">Keep searching after the first route</label>
+    </div>
+
+    <button id="go" type="submit">Search</button>
+    <div class="hint">r0 admits ~2000 candidates per expansion and r5 about 13. The
+      first search at a given radius loads its rule set and takes a few seconds longer.</div>
+  </form>
+
+  <section>
+    <div class="stats" id="stats"></div>
+    <h2>Live log</h2>
+    <div id="log"><div class="muted">idle — pick a target and press Search.</div></div>
+    <div id="results"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let source = null;
+
+fetch("/api/presets").then(r => r.json()).then(d => {
+  for (const p of d.presets) {
+    const o = document.createElement("option");
+    o.value = p.smiles; o.textContent = p.name;
+    $("preset").appendChild(o);
+  }
+});
+
+$("preset").addEventListener("change", e => {
+  if (e.target.value) $("smiles").value = e.target.value;
+});
+$("policy").addEventListener("change", e => {
+  $("modelWrap").style.display = e.target.value === "llm" ? "block" : "none";
+});
+$("ranked").addEventListener("change", e => {
+  $("topnWrap").style.display = e.target.checked ? "block" : "none";
+  // The similarity policy scores frontier nodes with the same ranker the cap uses;
+  // without it there is nothing to rank on.
+  if (!e.target.checked && $("policy").value === "greedy_similarity") {
+    $("policy").value = "mcts";
+  }
+});
+
+function line(html, cls) {
+  const d = document.createElement("div");
+  if (cls) d.className = cls;
+  d.innerHTML = html;
+  const log = $("log");
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+}
+
+function pad(n, w) { return String(n).padStart(w, " "); }
+
+function setStats(items) {
+  $("stats").innerHTML = items.map(([v, k]) =>
+    `<div class="stat"><b>${esc(v)}</b><span>${esc(k)}</span></div>`).join("");
+}
+
+function renderRoutes(d) {
+  const box = $("results");
+  if (!d.solved) {
+    box.innerHTML = `<h2>Result</h2><p class="muted">No route to the chassis was found
+      (${esc(d.stopped_because)}). The graph reached ${d.n_molecules} molecules.
+      A lower radius or a larger budget are the two levers.</p>`;
+    return;
+  }
+  let html = `<h2>Routes found (${d.routes.length} shown)</h2>`;
+  for (const r of d.routes) {
+    html += `<div class="route"><header><h3>${r.n_steps} enzymatic step${r.n_steps > 1 ? "s" : ""}</h3>
+      <span>${Math.round(r.ec_coverage * 100)}% of steps have a known EC</span></header>`;
+    for (const s of r.steps) {
+      const ec = s.ec_numbers && s.ec_numbers.length
+        ? `<span class="ec">EC ${esc(s.ec_numbers.slice(0, 3).join(", "))}</span>` : "";
+      html += `<div class="step">
+        <div class="smi">${s.precursors.map(esc).join(" <span class='arrow'>+</span> ")}</div>
+        <div class="smi"><span class="arrow">→</span> ${esc(s.substrate)}${ec}</div>`;
+      if (s.cofactors && s.cofactors.length) {
+        html += `<div class="muted" style="font-size:12px">cofactors: ${s.cofactors.map(esc).join(", ")}</div>`;
+      }
+      html += `</div>`;
+    }
+    if (r.leaves && r.leaves.length) {
+      html += `<div class="chassis"><b>From the chassis:</b><br>` +
+        r.leaves.map(l => `<span class="pill">${esc(l.label)}</span>`).join("") + `</div>`;
+    }
+    html += `<div class="muted" style="font-size:12px;margin-top:8px">
+      ${r.n_steps} heterologous enzyme${r.n_steps > 1 ? "s" : ""} to introduce</div></div>`;
+  }
+  box.innerHTML = html;
+}
+
+$("f").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (source) { source.close(); source = null; }
+  $("log").innerHTML = "";
+  $("results").innerHTML = "";
+  setStats([]);
+  $("go").disabled = true;
+  $("go").textContent = "Searching…";
+
+  const body = {
+    smiles: $("smiles").value,
+    policy: $("policy").value,
+    model: $("model").value,
+    radius: +$("radius").value,
+    budget: +$("budget").value,
+    max_depth: +$("depth").value,
+    seed: +$("seed").value,
+    require_ec: $("requireEc").checked,
+    exhaustive: $("exhaustive").checked,
+    ranked: $("ranked").checked,
+    top_n: +$("topn").value,
+  };
+  const res = await fetch("/api/search", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  }).then(r => r.json());
+
+  if (res.error) { line(esc(res.error), "err"); $("go").disabled = false;
+                   $("go").textContent = "Search"; return; }
+
+  let solvedAt = null;
+  source = new EventSource(`/api/events?run=${res.run}`);
+  source.onmessage = (ev) => {
+    const d = JSON.parse(ev.data);
+    if (d.type === "status") {
+      line(`<span class="muted">${esc(d.text)}</span>`);
+    } else if (d.type === "decision") {
+      const solved = d.solved_after && solvedAt === null;
+      if (solved) solvedAt = d.step;
+      line(`#${pad(d.step, 3)}  depth ${d.depth}  frontier ${pad(d.frontier_size, 4)}` +
+           `  →${pad(d.n_neighbours, 4)} precursor sets   ${esc(d.smiles.slice(0, 70))}` +
+           (solved ? `   <span class="ok">SOLVED</span>` : ""),
+           solved ? "ok" : null);
+    } else if (d.type === "done") {
+      setStats([
+        [d.solved ? "yes" : "no", "solved"],
+        [d.n_expansions, "expansions"],
+        [d.n_molecules, "molecules built"],
+        [d.n_reactions, "reactions"],
+        [d.elapsed_s + " s", "wall clock"],
+      ]);
+      renderRoutes(d);
+      line(`<span class="muted">finished: ${esc(d.stopped_because)} after ` +
+           `${d.n_expansions} expansions, ${d.elapsed_s}s</span>`);
+    } else if (d.type === "error") {
+      line(esc(d.text), "err");
+    } else if (d.type === "eof") {
+      source.close(); source = null;
+      $("go").disabled = false; $("go").textContent = "Search";
+    }
+  };
+  source.onerror = () => {
+    line("connection to the server was lost", "err");
+    if (source) { source.close(); source = null; }
+    $("go").disabled = false; $("go").textContent = "Search";
+  };
+});
+</script>
+</body>
+</html>
