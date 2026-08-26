@@ -18,16 +18,33 @@ something.
 
 Why similarity to the native substrate
 --------------------------------------
-Measured on the 43 attested disconnections of the curated set that our r2 rules can
-reproduce at all, against the metrics the field's scoping review names (Gricourt et al.
-2024):
+Measured on the attested disconnections of the curated set that our rules reproduce at
+all, against the metrics the field's scoping review names (Gricourt et al. 2024). The
+campaign radius is r1, which reproduces 55 of the 70 attested steps; the r2 column is
+kept because it is a different and easier problem, not a contradiction -- r1 admits more
+rules, so there is more to rank. 102 candidates per step on average at r1, median 92,
+max 474.
 
-    scorer                MRR    cov@10   median rank
-    native_similarity   0.587      88%          2
-    closeness_worst     0.486      86%          3
-    rule index          0.333      65%          6
-    template_prior      0.276      65%          8
-    enzymatic score     0.238      70%          8
+    scorer                     r1 MRR   cov@10   cov@20   median | r2 MRR  cov@10
+    native_similarity_all       0.410      76%      89%        4 |      -       -
+    native_similarity           0.398      78%      89%        5 |  0.587     88%
+    similarity_x_ec             0.398      78%      89%        5 |      -       -
+    closeness_worst             0.371      60%      72%        5 |  0.486     86%
+    closeness_best              0.265      58%      70%        6 |      -       -
+    template_prior              0.225      52%      65%       10 |  0.276     65%
+    arbitrary (rule index)      0.184      49%      69%       11 |  0.333     65%
+    enzymatic score             0.074      21%      41%       26 |  0.238     70%
+
+Three results worth keeping:
+
+- cov@20 is the quantity the cap consumes, and 89% of it predicts losing ~6 of the 55
+  steps. Capping at 20 was measured independently to cost 5 (55 exact -> 50). The two
+  benchmarks agree without having been fitted to each other.
+- `closeness_worst` leads at rank 1 (27% against 23%) and loses badly by rank 10. Same
+  lesson as the frontier orderings: a scorer that is often first but sometimes far is
+  worse under a cap than one that is steadily near. Rank the window, not the winner.
+- `similarity_x_ec` is identical to `native_similarity` on all four thresholds. The EC
+  annotation adds nothing to the ordering, and `enzymatic` alone ranks below arbitrary.
 
 It wins, but the decisive argument is *when* it can be computed. It needs only the query
 molecule and `RuleSet.smi_sub`, so it ranks **before** RDKit validation: we validate only
@@ -38,13 +55,20 @@ The fingerprint radius here is fixed at 2 and is deliberately **not** the templa
 radius. Molecular similarity has to keep meaning the same thing when the rule set's
 promiscuity changes, or r1 and r2 stop being comparable.
 
-Known limitation
-----------------
+Known limitation, and what it actually costs
+--------------------------------------------
 `smi_sub` carries one representative substrate per rule, while a rule may be derived from
 hundreds of MetaNetX reactions — rule 0 lists 385. RetroPath RL compares against all
-native substrates and keeps the best match. Doing the same needs the `reaction_id` join,
-which currently fails because that field is a `|`-separated list whose entries carry a
-`__split0` suffix the reaction table does not use. Fixing it would likely raise the MRR.
+native substrates and keeps the best match.
+
+`native_similarity_all` does exactly that and is in the table above: it buys 0.012 of MRR
+and one place of median rank, and **the same cov@20 of 89%**. Since cov@20 is the only
+quantity the cap consumes, the approximation is free at the operating point. It is the
+cheaper scorer that ships, and the limitation is measured rather than merely declared.
+
+The earlier note here predicted that fixing the `reaction_id` join "would likely raise the
+MRR". It does, negligibly. Recorded because a prediction that was checked and came back
+small is worth more than one left open.
 """
 
 from __future__ import annotations
