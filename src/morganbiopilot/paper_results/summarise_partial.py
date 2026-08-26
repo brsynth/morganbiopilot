@@ -106,14 +106,21 @@ def main() -> None:
           f"seeds {seeds}")
 
     for policy in policies:
-        done = {r.target for r in rows if r.policy == policy}
-        if args.expected_targets:
-            pct = 100.0 * len(done) / args.expected_targets
-            flag = "" if pct >= 95 else "   <-- too partial to read as a result"
-            print(f"  {policy:32s} {len(done):4d}/{args.expected_targets} "
-                  f"targets ({pct:.0f}%){flag}")
-        else:
-            print(f"  {policy:32s} {len(done):4d} targets")
+        mine = [r for r in rows if r.policy == policy]
+        done = {r.target for r in mine}
+        if not args.expected_targets:
+            print(f"  {policy:32s} {len(done):4d} targets, {len(mine)} runs")
+            continue
+        # Targets AND runs. Counting only distinct targets hides a missing
+        # (seed, target) whenever another seed covers that target -- which is
+        # exactly what a multi-seed partial looks like near the end, and it would
+        # report 100% while a run is still outstanding.
+        want_runs = args.expected_targets * len(seeds)
+        pct_t = 100.0 * len(done) / args.expected_targets
+        pct_r = 100.0 * len(mine) / want_runs
+        flag = "" if min(pct_t, pct_r) >= 95 else "   <-- too partial to read"
+        print(f"  {policy:32s} {len(done):3d}/{args.expected_targets} targets "
+              f"({pct_t:.0f}%), {len(mine):3d}/{want_runs} runs ({pct_r:.0f}%){flag}")
 
     if not args.expected_targets:
         print("\nCOVERAGE unknown: pass --expected-targets. Solved runs finish first,\n"
