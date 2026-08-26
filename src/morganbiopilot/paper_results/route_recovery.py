@@ -82,7 +82,7 @@ from morganbiopilot.core.rules import load_rules
 from morganbiopilot.multi_step.heuristics import SinkCloseness
 from morganbiopilot.multi_step.mcts import MCTS
 from morganbiopilot.multi_step.policy import (BreadthFirst, DepthFirst, GreedyECFP,
-                                              RandomPolicy)
+                                              GreedySimilarity, RandomPolicy)
 from morganbiopilot.multi_step.routes import Route, extract_routes
 from morganbiopilot.multi_step.search import search
 from morganbiopilot.one_step.expand import expand
@@ -427,6 +427,9 @@ def main(argv=None) -> int:
     rule_ec = annotate_rules(rules)
     prefilter = prefilter_from_rules(rules)
     closeness = SinkCloseness(args.radius)
+    from morganbiopilot.one_step.ranking import make_ranker
+    ranker = make_ranker(args.ranker, rules)
+
     factories = {
         "bfs": lambda: BreadthFirst(),
         "dfs": lambda: DepthFirst(),
@@ -434,9 +437,17 @@ def main(argv=None) -> int:
         "greedy": lambda: GreedyECFP(closeness),
         "mcts": lambda: MCTS(closeness),
     }
-    from morganbiopilot.one_step.ranking import make_ranker
-    ranker = make_ranker(args.ranker, rules)
+    if ranker is not None:
+        # The strongest policy measured on LASER, and it was missing here: recovery
+        # could not be reported for the one baseline that beats the fine-tuned model.
+        # It needs the ranker, so it only exists when one was asked for.
+        factories["greedy_similarity"] = lambda: GreedySimilarity(rules, prefilter,
+                                                                  ranker)
+
     names = [n.strip() for n in args.policies.split(",") if n.strip()]
+    # A results row records GreedyECFP under the name "greedy_ecfp"; accept what the
+    # TSV shows so that rerunning an arm read off a table works.
+    names = [{"greedy_ecfp": "greedy"}.get(n, n) for n in names]
     unknown = [n for n in names if n not in factories]
     if unknown:
         raise SystemExit(f"unknown policies: {unknown}; have {sorted(factories)}")
