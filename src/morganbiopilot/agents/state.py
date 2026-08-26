@@ -272,25 +272,31 @@ class FrontierView:
         return "\n".join(lines)
 
 
-def build_frontier_view(
+def select_frontier_ids(
     graph: SearchGraph,
     frontier: Sequence[int],
     top_k: int = DEFAULT_TOP_K,
     order: str = DEFAULT_FRONTIER_ORDER,
     seed: int = 0,
-    closeness=None,
-    rule_ec=None,
-    plausibility=None,
-    shuffle: bool = True,
     ranker=None,
     prefilter=None,
-) -> FrontierView:
-    """Select and render the frontier molecules the agent will choose among.
+    rule_ec=None,
+    shuffle: bool = True,
+) -> List[int]:
+    """Which frontier molecules a policy is allowed to choose among.
 
-    `closeness` and `rule_ec` are the tool surface: pass them for the tooled
-    condition, leave them None for the untooled one (section 8's grounding
-    ablation). They enrich each candidate — they never reorder the frontier, which
-    is what keeps the truncation policy-neutral.
+    Split out of `build_frontier_view` so that the same truncation can be handed to
+    a *classical* policy, which otherwise sees the whole frontier. That asymmetry is
+    the campaign's weakest point: the agent picks one of 20 candidates the portfolio
+    selected, while UCT and the greedy variants rank thousands. Comparing the two
+    conflates the policy with the view it was given, and the only way to separate
+    them is to run the classical policies under the same view -- which needs the
+    selection without the rendering, prompts and tool surface that `FrontierView`
+    carries.
+
+    Note what the answer to that control cannot be assumed: if a classical policy
+    restricted to V_t matches the agent, the portfolio is doing the work; if it
+    collapses, the truncation is a real handicap the agent overcomes.
     """
     if order not in FRONTIER_ORDERS:
         raise ValueError(f"order must be one of {FRONTIER_ORDERS}, got {order!r}")
@@ -323,6 +329,31 @@ def build_frontier_view(
         # run-to-run variance, which is how to get error bars from a model whose
         # temperature cannot be pinned.
         random.Random(seed + len(chosen)).shuffle(chosen)
+    return chosen
+
+
+def build_frontier_view(
+    graph: SearchGraph,
+    frontier: Sequence[int],
+    top_k: int = DEFAULT_TOP_K,
+    order: str = DEFAULT_FRONTIER_ORDER,
+    seed: int = 0,
+    closeness=None,
+    rule_ec=None,
+    plausibility=None,
+    shuffle: bool = True,
+    ranker=None,
+    prefilter=None,
+) -> FrontierView:
+    """Select and render the frontier molecules the agent will choose among.
+
+    `closeness` and `rule_ec` are the tool surface: pass them for the tooled
+    condition, leave them None for the untooled one (section 8's grounding
+    ablation). They enrich each candidate — they never reorder the frontier, which
+    is what keeps the truncation policy-neutral.
+    """
+    chosen = select_frontier_ids(graph, frontier, top_k, order, seed,
+                                 ranker, prefilter, rule_ec, shuffle)
     # One aggregation for the whole view: the traversal is global, so doing it per
     # candidate would repeat the same Dijkstra `top_k` times.
     routes = {} if plausibility is None else plausibility.node_scores(graph, chosen)
