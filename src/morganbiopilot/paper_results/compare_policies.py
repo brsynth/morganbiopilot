@@ -401,6 +401,7 @@ def _run_policies(args, rules, rule_ec, prefilter, pathways, names, seeds,
                 stop_on_first_pathway=not args.exhaustive,
                 ranker=ranker, top_n=args.top_n,
                 max_seconds=args.max_seconds,
+                view_top_k=args.view_top_k,
             )
             row = Row(
                 policy=result.policy, target=name, repeat=repeat, seed=seed,
@@ -549,6 +550,14 @@ def build_parser() -> argparse.ArgumentParser:
     # report stopped_because=time and are visible as such in the TSV.
     p.add_argument("--max-seconds", type=float, default=None,
                    help="wall-clock bound on ONE search; unset means unbounded")
+    # The matched control for the agent comparison. Classical policies rank the whole
+    # frontier while the agent chooses among the 20 the portfolio selected, so a
+    # classical win may be the extra candidates rather than the policy. Setting this
+    # to the same 20 puts them under the identical view. Off by default: every
+    # published classical number was measured unrestricted.
+    p.add_argument("--view-top-k", type=int, default=None,
+                   help="restrict EVERY policy to the portfolio's top-k frontier "
+                        "view, as the LLM arms already are (matched control)")
     p.add_argument("--llm", action="store_true", help="also run LLM policies (costs money)")
     p.add_argument("--models", default="claude-opus-5")
     p.add_argument("--efforts", default="medium")
