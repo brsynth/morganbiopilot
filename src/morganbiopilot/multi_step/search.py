@@ -67,6 +67,7 @@ def search(
     on_decision: Optional[Callable[[dict], None]] = None,
     ranker=None,
     top_n: Optional[int] = None,
+    view_top_k: Optional[int] = None,
 ) -> SearchResult:
     """Search for routes from `target` down to the chassis sink.
 
@@ -122,6 +123,17 @@ def search(
         if not frontier:
             result.stopped_because = "frontier_empty"
             break
+
+        # The matched control. Off by default, so every number measured so far is
+        # unaffected: classical policies see the whole frontier, which is how they
+        # were run. Set `view_top_k` and they choose among exactly the candidates the
+        # portfolio would have shown an agent -- the comparison that separates the
+        # learned policy from the view it is given.
+        if view_top_k:
+            from morganbiopilot.agents.state import select_frontier_ids
+            frontier = select_frontier_ids(
+                graph, frontier, top_k=view_top_k, seed=result.n_expansions,
+                ranker=ranker, prefilter=prefilter)
 
         node_id = policy.select(graph, frontier)
         node = graph.molecules[node_id]
