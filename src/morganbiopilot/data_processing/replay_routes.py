@@ -66,7 +66,8 @@ def render_user(graph: SearchGraph, view, target: str) -> str:
 
 
 def replay(target: str, tree: Dict[str, int], rules, prefilter, top_k: int,
-           seed: int, max_depth: int, ranker=None, top_n=None, rule_ec=None) -> tuple:
+           seed: int, max_depth: int, ranker=None, top_n=None, rule_ec=None,
+           show_ec: bool = False) -> tuple:
     """(pairs, outcome) for one route tree.
 
     A route is a tree, not a chain: one step can leave two precursors to make and both
@@ -120,8 +121,20 @@ def replay(target: str, tree: Dict[str, int], rules, prefilter, top_k: int,
         # distribution mismatch this file exists to avoid: the model would be taught to
         # choose among twenty molecules selected one way and then asked to choose among
         # twenty selected another.
+        # `rule_ec=None`, deliberately, and this was a real defect until it was measured.
+        # Passing it made every corpus line carry `| EC=1,2`, while the arms the paper
+        # reports run `--tooling untooled`, whose ToolSurface has `rule_ec=None` and
+        # renders no such field. The model was therefore trained to read a column it
+        # never sees at evaluation -- the exact train/inference mismatch this replay
+        # exists to prevent.
+        #
+        # Only the rendering is affected: `rule_ec` also feeds the portfolio's
+        # `precedent` member, but over 183 frontier states of eight curated targets the
+        # selected top-20 was identical with and without it, so the candidates shown do
+        # not change. Pass `--show-ec` to restore the column for a tooled corpus.
         view = build_frontier_view(graph, frontier, top_k=top_k, seed=seed + len(pairs),
-                                   ranker=ranker, prefilter=prefilter, rule_ec=rule_ec)
+                                   ranker=ranker, prefilter=prefilter,
+                                   rule_ec=rule_ec, show_ec=show_ec)
         visible = [(k, on_route[_skeleton(c.smiles)])
                    for k, c in enumerate(view.candidates)
                    if _skeleton(c.smiles) in on_route]
@@ -144,7 +157,7 @@ def replay(target: str, tree: Dict[str, int], rules, prefilter, top_k: int,
         pairs.append({
             "system": SYSTEM_PROMPT,
             "user": render_user(graph, view, target),
-            "assistant": json.dumps({"choice": index, "reason": ""}),
+            "assistant": json.dumps({"choice": index}),
             "depth": graph.molecules[view.candidates[index].node_id].depth,
             "n_on_route": len(visible),
             "n_shown": len(view.candidates),
@@ -188,6 +201,11 @@ def main() -> int:
     # replay that turns routes into decisions is capped exactly like inference.
     parser.add_argument("--ranker", default=None,
                         help="'native_similarity' to order rules before validation")
+    parser.add_argument("--show-ec", action="store_true",
+                        help="render the EC column, matching --tooling ec_only or "
+                             "tooled. Off by default: the reported arms are untooled "
+                             "and show no EC, and a corpus that does would train the "
+                             "model on a column it never sees")
     parser.add_argument("--top-n", type=int, default=None,
                         help="neighbours kept per expansion; needs --ranker")
     args = parser.parse_args()
@@ -246,7 +264,7 @@ def main() -> int:
         i, entry = job
         return replay(entry["target"], entry["tree"], rules, prefilter,
                       args.top_k, args.seed + i, args.max_depth,
-                      ranker, args.top_n, rule_ec)
+                      ranker, args.top_n, rule_ec, args.show_ec)
 
     # Already (original_index, entry): the index is the route's seed, and it must
     # survive slicing so that concatenated slices equal one undivided run.

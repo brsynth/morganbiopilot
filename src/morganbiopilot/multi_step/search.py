@@ -48,8 +48,13 @@ class SearchResult:
 
     @property
     def shortest_pathway_length(self) -> Optional[int]:
-        routes = self.pathways()
-        return min((len(r) for r in routes), default=None)
+        # `graph.shortest_route`, not `min(len(r) for r in pathways())`: the latter
+        # enumerates every route to keep one, which is the cartesian product that
+        # stalled four runs at budget 200. It is also less correct -- an enumeration
+        # truncated at `max_routes` can miss the shortest route entirely, so the old
+        # form could report a longer route than the graph contains.
+        route = self.graph.shortest_route()
+        return None if route is None else len(route)
 
 
 def search(
@@ -91,8 +96,9 @@ def search(
     expansion itself would change what the timing columns measure.
 
     `ranker` and `top_n` cap each expansion (`one_step.ranking`). They are a property of
-    the **environment**, not of the policy: set them once and every arm explores the
-    same graph, which is the only way the comparison between arms means anything. Both
+    the **environment**, not of the policy: set them once and every arm expands under
+    the same operator, which is the only way the comparison between arms means
+    anything. What each arm then builds differs — that is the measurement. Both
     or neither. Measured at r1 with `native_similarity` and 20: 8 of the 20 attested
     routes stay reproducible against 6 at r2 uncapped, and the median expansion drops
     from 96 candidates to 20 — the branching that otherwise leaves UCT stuck at depth 1

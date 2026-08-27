@@ -115,12 +115,10 @@ def enzymatic_fraction(result, rule_ec) -> float:
     plausibility is a genuine differentiator between policies. Run both and report
     the unfiltered one for this metric.
     """
-    routes = result.pathways()
-    if not routes or rule_ec is None:
-        return float("nan")
-
-    shortest = min(routes, key=len)
-    if not shortest:
+    # The shortest route directly, not the minimum of every enumerated route: the
+    # enumeration is a cartesian product and is what stalled runs at budget 200.
+    shortest = result.graph.shortest_route()
+    if not shortest or rule_ec is None:
         return float("nan")
 
     # The neighbour's merged annotation, not the representative rule's: `expand` folds
@@ -249,6 +247,9 @@ def build_policies(args, radius: int, rule_ec, seeds, rules=None, prefilter=None
                             # The frontier order is part of the environment; without
                             # these the view silently falls back to `_stratify`.
                             ranker=ranker, prefilter=prefilter,
+                            # Scores the portfolio's precedent member; whether the
+                            # agent sees an EC column is still `tools`.
+                            rule_ec=rule_ec,
                         )
                     )
     return policies

@@ -131,12 +131,19 @@ def _interleave(orders, ids):
 # O(steps x frontier) prefilter passes instead of O(distinct molecules): a 30-route
 # replay probe ran past ten minutes where the whole 12,251-route corpus took eighty.
 # `GreedySimilarity` caches the same quantity for the same reason.
-_PORTFOLIO_CACHE: Dict[str, tuple] = {}
+_PORTFOLIO_CACHE: Dict[tuple, tuple] = {}
 
 
 def _portfolio_scores(smi, ranker, prefilter, rule_ec):
-    """(similarity, precedent, heavy_atoms) for one molecule, computed once."""
-    hit = _PORTFOLIO_CACHE.get(smi)
+    """(similarity, precedent, heavy_atoms) for one molecule, computed once.
+
+    Keyed on whether an EC annotation was available, not on the SMILES alone. The
+    precedent member is 0 without one, so a cache shared between the two would serve
+    a score computed under the other condition -- which is exactly how a comparison
+    of the two views was once measured as identical when it is not.
+    """
+    key = (smi, rule_ec is not None)
+    hit = _PORTFOLIO_CACHE.get(key)
     if hit is not None:
         return hit
 
@@ -161,7 +168,7 @@ def _portfolio_scores(smi, ranker, prefilter, rule_ec):
 
     m = Chem.MolFromSmiles(smi)
     out = (sim, prec, m.GetNumHeavyAtoms() if m else 10 ** 6)
-    _PORTFOLIO_CACHE[smi] = out
+    _PORTFOLIO_CACHE[key] = out
     return out
 
 
@@ -344,14 +351,24 @@ def build_frontier_view(
     shuffle: bool = True,
     ranker=None,
     prefilter=None,
+    show_ec: Optional[bool] = None,
 ) -> FrontierView:
     """Select and render the frontier molecules the agent will choose among.
 
-    `closeness` and `rule_ec` are the tool surface: pass them for the tooled
+    `closeness` and `plausibility` are the tool surface: pass them for the tooled
     condition, leave them None for the untooled one (section 8's grounding
-    ablation). They enrich each candidate — they never reorder the frontier, which
-    is what keeps the truncation policy-neutral.
+    ablation). They enrich each candidate and do not reorder the frontier.
+
+    `rule_ec` is different and used to be conflated with them. It feeds the
+    portfolio's `precedent` member, so it DOES change which candidates are
+    selected: with the score cache neutralised, the chosen top-20 differed in all
+    108 frontier states measured, by up to 6 of 20. Pass it always — it is part of
+    the environment, like `ranker` and `prefilter` — and use `show_ec` to decide
+    whether the column is rendered. `show_ec=None` keeps the old behaviour of
+    displaying it exactly when `rule_ec` is given.
     """
+    if show_ec is None:
+        show_ec = rule_ec is not None
     chosen = select_frontier_ids(graph, frontier, top_k, order, seed,
                                  ranker, prefilter, rule_ec, shuffle)
     # One aggregation for the whole view: the traversal is global, so doing it per
@@ -371,7 +388,8 @@ def build_frontier_view(
             node_id=node_id,
             smiles=node.smiles,
             depth=node.depth,
-            ec_classes=_reachable_ec_classes(graph, node_id, rule_ec),
+            ec_classes=(_reachable_ec_classes(graph, node_id, rule_ec)
+                        if show_ec else ()),
             closeness=best_sim,
             nearest_bb=best_label,
             nearest_bb_smiles=best_smiles,

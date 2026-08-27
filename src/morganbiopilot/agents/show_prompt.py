@@ -46,7 +46,7 @@ class RecordingBackend:
     def complete(self, system, prompt, schema):
         self.prompts.append(prompt)
         # Always take the first candidate: any fixed rule advances the search.
-        return Completion(text=json.dumps({"choice": 0, "reason": "fixed"}),
+        return Completion(text=json.dumps({"choice": 0}),
                           input_tokens=0, output_tokens=0)
 
 

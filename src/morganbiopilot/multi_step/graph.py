@@ -174,23 +174,96 @@ class SearchGraph:
             if not m.solved and not m.expanded and not m.available
         ]
 
+    # Enumeration steps allowed in one `pathways` call before it gives up. Reached only
+    # on graphs that are both large and densely solved -- which budget 200 made routine
+    # and budget 50 never did.
+    MAX_PATHWAY_WORK = 2_000_000
+
+    def shortest_route(self, node_id: Optional[int] = None) -> Optional[List[int]]:
+        """The shortest solved route below a molecule, without enumerating any other.
+
+        `pathways` answers this by building every route and taking the minimum, which
+        is a cartesian product and the reason a solved search could hang. The shortest
+        route needs no enumeration: on an AND-OR graph the cost of a molecule is 0 when
+        it is available and otherwise `1 + sum(cost(children))` minimised over its
+        solved reactions, which is a fixed point reached by relaxation in at most
+        `len(molecules)` sweeps. Cycles need no special case: a cycle can only ever
+        raise a cost, so it never enters the fixed point.
+
+        Returns None when the molecule is unsolved, and [] when it is already available.
+        """
+        if node_id is None:
+            node_id = self.root
+        if not self.molecules[node_id].solved:
+            return None
+
+        INF = float("inf")
+        cost = {i: (0 if m.available else INF) for i, m in self.molecules.items()}
+        best: Dict[int, Optional[int]] = {i: None for i in self.molecules}
+
+        changed = True
+        while changed:
+            changed = False
+            for rid, rxn in self.reactions.items():
+                if not rxn.solved:
+                    continue
+                total = 1
+                for child in rxn.children:
+                    total += cost[child]
+                    if total == INF:
+                        break
+                if total < cost[rxn.parent]:
+                    cost[rxn.parent] = total
+                    best[rxn.parent] = rid
+                    changed = True
+
+        if cost[node_id] == INF:
+            return None
+
+        # Walk the argmin back down. `_seen` guards a malformed graph only: a cycle
+        # cannot be on a finite-cost path, so this terminates on any graph the
+        # relaxation above scored.
+        route: List[int] = []
+        stack, seen = [node_id], set()
+        while stack:
+            mid = stack.pop()
+            if mid in seen or self.molecules[mid].available:
+                continue
+            seen.add(mid)
+            rid = best[mid]
+            if rid is None:
+                continue
+            route.append(rid)
+            stack.extend(self.reactions[rid].children)
+        return route
+
     def pathways(self, node_id: Optional[int] = None, _seen=None,
-                 max_routes: int = 256) -> List[List[int]]:
+                 max_routes: int = 256, _work: Optional[List[int]] = None
+                 ) -> List[List[int]]:
         """Solved routes below a molecule, as lists of reaction-node ids.
 
         Returns [[]] for a molecule already available (sink or cofactor), and []
         when the molecule is unsolved. Cycles are cut by `_seen`.
 
-        `max_routes` is a hard cap, and it is load-bearing rather than defensive:
-        the enumeration is a cartesian product across every solved reaction of
-        every molecule in the route, so a densely solved graph produces
-        combinatorially many routes that differ in one step. Without the cap a
-        successful search can hang while enumerating variants nobody will read.
-        Metrics here only ever use the shortest route and the count.
+        `max_routes` caps what is RETURNED, and that is not enough on its own. It was
+        assumed to bound the cost and does not: `_seen` differs along every path, so
+        nothing can be memoised and the same subgraph is re-enumerated once per path
+        that reaches it. On a 1382-molecule graph this call had not returned after nine
+        minutes when asked for a single route, which is what stalled four runs of the
+        campaign at budget 200 -- after they had already found their route, since an
+        unsolved root returns [] immediately.
+
+        `MAX_PATHWAY_WORK` therefore bounds the work as well, deterministically rather
+        than by wall-clock: a research result should not depend on how loaded the node
+        was. On exhaustion the routes found so far are returned, so the caller sees a
+        truncated enumeration rather than a hang. **Use `shortest_route` when the
+        shortest route is what you need** -- it is exact and needs no enumeration.
         """
         if node_id is None:
             node_id = self.root
         _seen = set() if _seen is None else _seen
+        top_level = _work is None
+        _work = [0] if _work is None else _work
 
         node = self.molecules[node_id]
         if node.available:
@@ -202,7 +275,7 @@ class SearchGraph:
         routes: List[List[int]] = []
 
         for rid in node.children:
-            if len(routes) >= max_routes:
+            if len(routes) >= max_routes or _work[0] >= self.MAX_PATHWAY_WORK:
                 break
             rxn = self.reactions[rid]
             if not rxn.solved:
@@ -210,13 +283,24 @@ class SearchGraph:
 
             combos: List[List[int]] = [[rid]]
             for child in rxn.children:
-                sub = self.pathways(child, _seen, max_routes=max_routes)
+                _work[0] += 1
+                sub = self.pathways(child, _seen, max_routes=max_routes, _work=_work)
                 if not sub:
                     combos = []
                     break
                 combos = [c + s for c in combos for s in sub][:max_routes]
+                _work[0] += len(combos)
             routes.extend(combos)
 
+        # A solved molecule must never report zero routes. Budget exhaustion inside a
+        # sub-enumeration surfaces as `sub == []`, which the AND-node rule turns into
+        # "this reaction has no route", and that can empty the whole result — reporting
+        # 0 routes for a graph that demonstrably has one. Fall back to the exact
+        # shortest route, which costs nothing and is always right.
+        if top_level and not routes and node.solved:
+            fallback = self.shortest_route(node_id)
+            if fallback:
+                return [fallback]
         return routes[:max_routes]
 
     def __repr__(self) -> str:

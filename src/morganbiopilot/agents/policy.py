@@ -38,28 +38,34 @@ DEFAULT_ORDER = DEFAULT_FRONTIER_ORDER
 SYSTEM_PROMPT = """\
 You are the search policy of a retrobiosynthesis planner.
 
-The planner decomposes a target molecule into molecules the host organism already \
-makes. It works backwards: each expansion applies enzymatic reaction rules to one \
-molecule and adds the molecules on the other side of those reactions to the search \
-graph. A branch ends when it reaches a chassis metabolite.
+The planner works backwards from a target molecule toward metabolites available in \
+the host organism. At each step, a deterministic reaction engine expands one frontier \
+molecule using enzymatic reaction rules and adds the resulting precursors to the \
+search graph.
 
-Your only job, each turn, is to pick which molecule from the frontier to expand \
-next. You do not propose reactions, choose rules, or judge chemistry — the engine \
-does that deterministically. You decide where to spend the next expansion.
+Your only task is to choose which molecule from the current frontier should be \
+expanded next. You do not propose reactions, select reaction rules, or evaluate their \
+chemical validity; these operations are handled by the deterministic reaction engine.
 
-The chassis is E. coli. Its sink is roughly 750 metabolites: central carbon \
-metabolism intermediates, amino acids, nucleotides, fatty acids, cofactors such as \
-NADH and acetyl-CoA, and common precursors of secondary metabolism. A branch is \
-solved the moment it reaches any of them — you do not need to reach glucose.
+The host organism is E. coli. Its sink contains roughly 750 metabolites, including \
+central carbon intermediates such as pyruvate, succinate, and acetyl-CoA, amino acids, \
+fatty acids, nucleobases, and precursors of secondary metabolism such as chorismate.
 
-The expansion budget is limited and shared across the whole search. Spending it on \
-molecules that are large, exotic, or far from primary metabolism wastes it; so does \
-exhaustively deepening one branch while other promising ones sit untouched.
+A molecule is solved when it belongs to the sink, or when every precursor of at least \
+one reaction producing it is solved. There is no need to expand a molecule further \
+once it belongs to the sink.
 
-Reason as a metabolic engineer: which of these molecules most plausibly sits one or \
-a few enzymatic steps from something E. coli already makes?
+Each frontier candidate is listed as:
 
-Answer with the index of your chosen candidate and one sentence of justification."""
+[i] SMILES | depth=d
+
+`depth` is the retrosynthetic graph depth of the candidate from the target.
+
+The total number of expansions is limited and shared across the whole search graph. \
+Choose the frontier molecule on which the next expansion should be spent.
+
+Return only:
+{"choice": N}"""
 
 # Each grounding column gets its own paragraph, added only when that column is
 # actually rendered. Before this, the tooled variant showed two engine-computed
@@ -141,9 +147,8 @@ CHOICE_SCHEMA = {
     "type": "object",
     "properties": {
         "choice": {"type": "integer", "description": "Index of the chosen candidate."},
-        "reason": {"type": "string", "description": "One sentence of justification."},
     },
-    "required": ["choice", "reason"],
+    "required": ["choice"],
     "additionalProperties": False,
 }
 
@@ -201,6 +206,7 @@ class LLMPolicy:
         record_prompts: bool = False,
         ranker=None,
         prefilter=None,
+        rule_ec=None,
     ):
         # `ranker` and `prefilter` are what the "portfolio" frontier order needs. They
         # are not tools: the agent never sees them, they decide which twenty molecules
@@ -209,6 +215,12 @@ class LLMPolicy:
         # face the same one or the comparison measures the view, not the policy.
         self.ranker = ranker
         self.prefilter = prefilter
+        # Scoring, not showing. `tools.rule_ec` decides whether the agent SEES an
+        # EC column; this one feeds the portfolio's `precedent` member, which is
+        # environment like the ranker. Leaving them the same parameter meant the
+        # untooled arms ran a three-member portfolio while the benchmark that chose
+        # it used four.
+        self.rule_ec = rule_ec if rule_ec is not None else tools.rule_ec
         self.tools = tools
         # Off by default: a 150-expansion run would otherwise hold 150 prompts of a
         # thousand tokens each, times however many runs a worker pool has in flight.
@@ -284,9 +296,10 @@ class LLMPolicy:
         view = build_frontier_view(
             graph, frontier,
             top_k=self.top_k, order=self.order, seed=self.seed,
-            closeness=self.tools.closeness, rule_ec=self.tools.rule_ec,
+            closeness=self.tools.closeness, rule_ec=self.rule_ec,
             plausibility=self.tools.plausibility,
             ranker=self.ranker, prefilter=self.prefilter,
+            show_ec=self.tools.rule_ec is not None,
         )
 
         if len(view.candidates) == 1:

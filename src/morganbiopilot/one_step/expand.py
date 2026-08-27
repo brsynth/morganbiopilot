@@ -119,8 +119,9 @@ def expand(
 
     `require_ec=True` drops rules with no EC annotation: the **enzymatic reality
     filter**. This is a property of the environment, not of any policy — every
-    baseline and every model then explores the same graph, which is what makes the
-    paper's comparison meaningful. Note the consequence for the tooled/untooled
+    baseline and every model then searches under the same expansion operator, so a
+    given molecule yields the same successors whichever policy asked for it. The
+    subgraphs they build differ, of course; that is what is being compared. Note the consequence for the tooled/untooled
     ablation: with this on, the "agent without EC" still searches an EC-filtered
     space, so the ablation measures *EC shown to the agent*, not *EC used at all*.
     Say which one the paper reports.
@@ -135,8 +136,8 @@ def expand(
     stops once that many neighbours exist — so the expensive validation is paid only
     on the candidates most likely to matter, and the frontier stops growing by
     hundreds per expansion. Both must be set, and like `require_ec` this is a property
-    of the **environment**: every policy then explores the same graph, which is what
-    makes the paper's comparison mean anything. Measured cost: at r2 a top-10 cut under
+    of the **environment**: every policy then sees the same successors for the same
+    expanded molecule, which is what makes the paper's comparison mean anything. Measured cost: at r2 a top-10 cut under
     `native_similarity` keeps 88% of attested disconnections against 65% for rule-index
     order, and coverage is a per-step figure that compounds along a route.
     """
@@ -180,7 +181,7 @@ def expand(
         if require_ec and not rule_ec.ec[rule_idx]:
             # Enzymatic reality filter: a rule with no EC behind it has no known
             # enzyme catalysing it, so it is not a biosynthetic step. Dropped here,
-            # in the engine, so every policy explores the same graph.
+            # in the engine, so no policy can reach a rule another cannot.
             report.n_dropped_no_ec += 1
             continue
 
