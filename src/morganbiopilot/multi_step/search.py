@@ -137,9 +137,12 @@ def search(
         # learned policy from the view it is given.
         if view_top_k:
             from morganbiopilot.agents.state import select_frontier_ids
+            # rule_ec included: it feeds the portfolio's precedent member, so leaving
+            # it out would hand the classical policies a three-member view while the
+            # agent gets four -- the very asymmetry this control exists to remove.
             frontier = select_frontier_ids(
                 graph, frontier, top_k=view_top_k, seed=result.n_expansions,
-                ranker=ranker, prefilter=prefilter)
+                ranker=ranker, prefilter=prefilter, rule_ec=rule_ec)
 
         node_id = policy.select(graph, frontier)
         node = graph.molecules[node_id]
