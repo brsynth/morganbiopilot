@@ -385,6 +385,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "cost is wildly non-uniform across targets, so an uncapped job "
                         "cannot be scheduled")
     p.add_argument("--policies", default="bfs,greedy,mcts")
+    p.add_argument("--models", default="",
+                   help="comma-separated backend specs to add as agent arms, e.g. "
+                        "'openai:policy,openai:Qwen/Qwen2.5-7B-Instruct'. Each becomes "
+                        "a policy named llm:<spec>; add it to --policies to run it")
+    p.add_argument("--top-k", type=int, default=20,
+                   help="frontier candidates shown to an agent arm")
     p.add_argument("--seed", type=int, default=0, help="for `random` only")
     p.add_argument("--max-pathways", type=int, default=256,
                    help="cap on the route enumeration; it is a cartesian product")
@@ -443,6 +449,21 @@ def main(argv=None) -> int:
         # It needs the ranker, so it only exists when one was asked for.
         factories["greedy_similarity"] = lambda: GreedySimilarity(rules, prefilter,
                                                                   ranker)
+
+    # The agent arms. Imported lazily so a classical run needs no API client, and
+    # named after the model they serve so a TSV row says which one it was. The tool
+    # surface is `untooled`, matching every reported search; `rule_ec` still goes in
+    # because it feeds the portfolio's precedent member, which is environment rather
+    # than grounding.
+    for spec in [m.strip() for m in (args.models or "").split(",") if m.strip()]:
+        def _make(sp=spec):
+            from morganbiopilot.agents.backends import make_backend
+            from morganbiopilot.agents.policy import LLMPolicy
+            from morganbiopilot.agents.tools import untooled
+            return LLMPolicy(tools=untooled(), backend=make_backend(sp),
+                             top_k=args.top_k, seed=args.seed,
+                             ranker=ranker, prefilter=prefilter, rule_ec=rule_ec)
+        factories[f"llm:{spec}"] = _make
 
     names = [n.strip() for n in args.policies.split(",") if n.strip()]
     # A results row records GreedyECFP under the name "greedy_ecfp"; accept what the
