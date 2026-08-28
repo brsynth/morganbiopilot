@@ -130,7 +130,7 @@ def _interleave(orders, ids):
 # re-examined at every subsequent step, so without this the view costs
 # O(steps x frontier) prefilter passes instead of O(distinct molecules): a 30-route
 # replay probe ran past ten minutes where the whole 12,251-route corpus took eighty.
-# `GreedySimilarity` caches the same quantity for the same reason.
+# The substrate-similarity member is the expensive one and is cached for that reason.
 _PORTFOLIO_CACHE: Dict[tuple, tuple] = {}
 
 

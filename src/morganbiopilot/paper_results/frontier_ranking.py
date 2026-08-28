@@ -137,8 +137,9 @@ class Scorers:
     def sim_max(self, smi: str) -> float:
         """Best Tanimoto to the native substrate of any rule that applies.
 
-        The quantity `GreedySimilarity` follows, and the only scorer measured to carry
-        a search: 72% on LASER against 56% for sink closeness.
+        The similarity member of the portfolio frontier view, and the only scorer
+        measured to carry a search on its own: 72% on LASER against 56% for sink
+        closeness.
         """
         p = self._profile(smi)
         return p[0] if p else 0.0

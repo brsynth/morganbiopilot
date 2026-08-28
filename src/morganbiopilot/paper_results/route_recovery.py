@@ -81,8 +81,7 @@ from morganbiopilot.core.paths import RESULTS_DIR
 from morganbiopilot.core.rules import load_rules
 from morganbiopilot.multi_step.heuristics import SinkCloseness
 from morganbiopilot.multi_step.mcts import MCTS
-from morganbiopilot.multi_step.policy import (BreadthFirst, DepthFirst, GreedyECFP,
-                                              GreedySimilarity, RandomPolicy)
+from morganbiopilot.multi_step.policy import BreadthFirst, DepthFirst, GreedyECFP
 from morganbiopilot.multi_step.routes import Route, extract_routes
 from morganbiopilot.multi_step.search import search
 from morganbiopilot.one_step.expand import expand
@@ -391,7 +390,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "a policy named llm:<spec>; add it to --policies to run it")
     p.add_argument("--top-k", type=int, default=20,
                    help="frontier candidates shown to an agent arm")
-    p.add_argument("--seed", type=int, default=0, help="for `random` only")
+    p.add_argument("--seed", type=int, default=0,
+                   help="drives the frontier presentation shuffle of the agent arms")
     p.add_argument("--max-pathways", type=int, default=256,
                    help="cap on the route enumeration; it is a cartesian product")
     p.add_argument("--variant", default="experimental", choices=("experimental", "core"))
@@ -439,17 +439,9 @@ def main(argv=None) -> int:
     factories = {
         "bfs": lambda: BreadthFirst(),
         "dfs": lambda: DepthFirst(),
-        "random": lambda: RandomPolicy(seed=args.seed),
         "greedy": lambda: GreedyECFP(closeness),
         "mcts": lambda: MCTS(closeness),
     }
-    if ranker is not None:
-        # The strongest policy measured on LASER, and it was missing here: recovery
-        # could not be reported for the one baseline that beats the fine-tuned model.
-        # It needs the ranker, so it only exists when one was asked for.
-        factories["greedy_similarity"] = lambda: GreedySimilarity(rules, prefilter,
-                                                                  ranker)
-
     # The agent arms. Imported lazily so a classical run needs no API client, and
     # named after the model they serve so a TSV row says which one it was. The tool
     # surface is `untooled`, matching every reported search; `rule_ec` still goes in

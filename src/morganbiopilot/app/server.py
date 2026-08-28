@@ -39,7 +39,7 @@ from typing import Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 HERE = Path(__file__).resolve().parent
-POLICIES = ("bfs", "dfs", "random", "greedy", "mcts", "llm")
+POLICIES = ("bfs", "dfs", "greedy", "mcts", "llm")
 
 
 # --------------------------------------------------------------------------- caching
@@ -123,18 +123,13 @@ RUNS_LOCK = threading.Lock()
 def build_policy(name: str, radius: int, seed: int, model: str):
     """One policy instance. Mirrors `paper_results.compare_policies.build_policies`."""
     from morganbiopilot.multi_step.mcts import MCTS
-    from morganbiopilot.multi_step.policy import (BreadthFirst, DepthFirst, GreedyECFP,
-                                                  GreedySimilarity, RandomPolicy)
+    from morganbiopilot.multi_step.policy import (BreadthFirst, DepthFirst,
+                                                  GreedyECFP)
 
-    if name == "greedy_similarity":
-        rules, _ec, prefilter = ENGINE.rules(radius)
-        return GreedySimilarity(rules, prefilter, ENGINE.ranker(radius))
     if name == "bfs":
         return BreadthFirst()
     if name == "dfs":
         return DepthFirst()
-    if name == "random":
-        return RandomPolicy(seed=seed)
     if name == "greedy":
         return GreedyECFP(ENGINE.closeness(radius))
     if name == "mcts":

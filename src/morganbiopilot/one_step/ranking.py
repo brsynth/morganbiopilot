@@ -168,10 +168,10 @@ class NativeSimilarity:
     def similarity(self, target: str, rule_idx: int) -> float:
         """Tanimoto between the query and one rule's native substrate.
 
-        Exposed because a *policy* can want the same quantity the expansion cap uses:
-        `GreedySimilarity` scores a frontier molecule by the best-precedented
-        disconnection available to it, which is the maximum of this over the rules that
-        apply.
+        Exposed because a *selector* can want the same quantity the expansion cap uses:
+        a frontier molecule is scored by the best-precedented disconnection available to
+        it, which is the maximum of this over the rules that apply. That is the
+        similarity member of the portfolio frontier view.
         """
         from rdkit import DataStructs
 

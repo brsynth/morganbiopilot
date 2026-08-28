@@ -78,9 +78,8 @@ from morganbiopilot.core.rules import load_rules
 from morganbiopilot.core.target_list import load_target_list
 from morganbiopilot.multi_step.heuristics import SinkCloseness
 from morganbiopilot.multi_step.mcts import MCTS
-from morganbiopilot.multi_step.policy import GreedySimilarity  # noqa: F401
 from morganbiopilot.multi_step.policy import (
-    BreadthFirst, DepthFirst, GreedyECFP, RandomPolicy,
+    BreadthFirst, DepthFirst, GreedyECFP,
 )
 from morganbiopilot.multi_step.routes import extract_routes, save_routes
 from morganbiopilot.multi_step.search import search
@@ -136,16 +135,9 @@ def build_policies(args, radius: int, rule_ec, seeds, rules=None, prefilter=None
     """Factories taking a seed and returning a fresh policy. LLM policies opt-in."""
     closeness = SinkCloseness(radius)
 
-    def greedy_similarity():
-        if ranker is None:
-            raise SystemExit("greedy_similarity needs --ranker native_similarity")
-        return GreedySimilarity(rules, prefilter, ranker)
-
     available = {
-        "greedy_similarity": lambda seed: greedy_similarity(),
         "bfs": lambda seed: BreadthFirst(),
         "dfs": lambda seed: DepthFirst(),
-        "random": lambda seed: RandomPolicy(seed=seed),
         "greedy": lambda seed: GreedyECFP(closeness),
         # UCT with static evaluation -- see MCTS for why rollouts are absent.
         "mcts": lambda seed: MCTS(closeness),
@@ -373,17 +365,16 @@ def _run_policies(args, rules, rule_ec, prefilter, pathways, names, seeds,
     in a `finally` without indenting the whole body."""
     for make_policy in build_policies(args, args.radius, rule_ec, seeds,
                                       rules, pf or prefilter, ranker):
-        # A seed only changes two things: the frontier presentation shuffle, which
-        # exists solely for the LLM, and `RandomPolicy`'s draw. Breadth-first,
-        # depth-first, greedy and MCTS are deterministic functions of the graph, so
+        # A seed changes one thing only: the frontier presentation shuffle, which
+        # exists solely for the LLM. Breadth-first, depth-first, greedy and MCTS
+        # are deterministic functions of the graph, so
         # repeating them across seeds recomputes an identical answer. Measured, not
         # assumed: on 379 BioNavi-NP targets, zero changed result between seeds for
         # either bfs or dfs, and every classical row on the golden set reported
         # +-0. That triple cost is what pushed the first BioNavi job past its 12 h
         # limit before MCTS had run at all.
         probe = make_policy(seeds[0])
-        stochastic = getattr(probe, "n_decisions", None) is not None \
-            or getattr(probe, "name", "") == "random"
+        stochastic = getattr(probe, "n_decisions", None) is not None
         policy_seeds = seeds if stochastic else seeds[:1]
         if policy_seeds is not seeds:
             print(f"  note: {getattr(probe, 'name', '?')} is deterministic; "
@@ -518,7 +509,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-depth", type=int, default=6, help="0 = unlimited")
     p.add_argument("--require-ec", action="store_true",
                    help="enzymatic reality filter: drop rules with no EC")
-    p.add_argument("--policies", default="bfs,random,greedy")
+    p.add_argument("--policies", default="bfs,greedy")
     p.add_argument("--targets", default="", help="comma-separated names; default all 20")
     p.add_argument("--targets-file", default="",
                    help="name<TAB>SMILES list instead of the golden set "
