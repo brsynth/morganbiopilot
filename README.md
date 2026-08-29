@@ -1,7 +1,8 @@
 # MorganBioPilot
 
 Agentic retrobiosynthesis: a language model acting as the **search policy** on top of a
-deterministic expansion engine in ECFP fingerprint space.
+deterministic expansion engine in ECFP fingerprint space. One model throughout —
+Qwen2.5-7B-Instruct, prompted and LoRA-fine-tuned.
 
 Node expansion is symbolic and reproducible — applicability prefiltering via the
 reaction-center ECFP, graph-level validation, precursor generation. The agent decides
@@ -41,8 +42,8 @@ solves it everywhere.
 reaction sides and never expanded. A route is solved when every leaf is one of them.
 
 **Budget.** The comparison axis is the number of **expansions**, one per policy decision.
-Wall-clock is reported but is not the axis: it conflates a local baseline with a hosted
-model behind an HTTP call.
+Wall-clock is reported but is not the axis: a classical policy decides in microseconds,
+the agent pays an HTTP round trip to a served 7B model for the same decision.
 
 **Two caps, often confused:**
 
@@ -91,11 +92,11 @@ src/morganbiopilot/
 │   ├── routes.py          solved search → readable, storable pathways
 │   └── plausibility.py    enzymatic score along a route
 │
-├── agents/            the only non-deterministic part
+├── agents/            the only non-deterministic part — Qwen2.5-7B-Instruct throughout
 │   ├── policy.py          LLMPolicy: one question per expansion, one JSON answer
 │   ├── state.py           rendering a search state; frontier selection and truncation
 │   ├── tools.py           the tool surface, and the grounding ablation
-│   ├── backends.py        provider backends (hosted API or local OpenAI-compatible)
+│   ├── backends.py        the client seam: an OpenAI-compatible endpoint (local vLLM)
 │   ├── train_policy.py    LoRA fine-tuning of the policy
 │   ├── show_prompt.py     print the exact prompt, spending no call
 │   └── smoke.py           first-run diagnostic: one real call, everything printed
@@ -191,9 +192,11 @@ not a measuring instrument — one draw, no seeds; do not quote its numbers.
 python -m morganbiopilot.paper_results.compare_policies --radius 1 --budgets 10,25,50,100,200 --policies bfs,dfs,greedy,mcts --seeds 0
 ```
 
-Add `--llm --models <spec>` to include the agent arms; they cost money or a GPU, so they
-are opt-in. Every run writes a TSV whose rows are recomputed into tables by
-`paper_results/tables.py` — no number in the paper is copied from a log summary.
+Add `--llm --models <spec>` to include the agent arms. They need a GPU serving
+Qwen2.5-7B-Instruct — prompted, or with the LoRA adapter loaded — so they are opt-in;
+without `--llm` only the classical policies run. Every run writes a TSV whose rows are
+recomputed into tables by `paper_results/tables.py` — no number in the paper is copied
+from a log summary.
 
 **The training pipeline**, in order:
 
@@ -236,9 +239,10 @@ and UCT are deterministic functions of the graph, so one seed is their complete 
 and they carry no error bars; the agent arms are repeated because the shuffle changes
 what they see.
 
-API keys are read from the environment (`OPENAI_API_KEY`, `OPENAI_BASE_URL` for a
-local OpenAI-compatible server) or a gitignored `.env`. None is needed for the classical
-policies.
+The agent arms talk to a locally served model over the OpenAI wire format, so
+`OPENAI_BASE_URL` points at that server and `OPENAI_API_KEY` is whatever token it
+expects; both are read from the environment or a gitignored `.env`. Neither is needed
+for the classical policies.
 
 `data/`, `results/`, `logs/`, `models/` and cluster job scripts are gitignored — the
 first two by size, the last because paths, accounts and partitions are specific to one
