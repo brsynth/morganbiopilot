@@ -148,8 +148,13 @@ being comparable.
 
 ## Data
 
-`data/` is roughly 1 GB of third-party corpora and is not version-controlled. Expected
-layout:
+`data/` and `models/` are not version-controlled — roughly 1.2 GB of third-party corpora
+and fitted weights. **They are deposited, anonymously, at:**
+
+<https://osf.io/5mcta/overview?view_only=28a3bd9f79bf41739b05230e8f3ed232>
+
+Download both and place them at the root of this repository; `core/paths.py` resolves
+every path relative to it and expects the layout below.
 
 ```
 data/
