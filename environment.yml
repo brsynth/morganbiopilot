@@ -6,12 +6,12 @@ name: morganbiopilot
 #   conda env create -f environment.yml
 #   conda activate morganbiopilot
 #   pip install -e .
-#   pip install -e ../../RetroMorgan/morganrxn
+#   pip install -e <path to the companion rule-set package>/morganrxn
 #
 # rdkit is pinned to the exact version used by the `morganrxn` env: counted ECFP
 # fingerprints must be bit-for-bit identical across both projects, otherwise the
-# ECFP templates and the applicability criterion of Meyer et al. 2026 are no
-# longer comparable.
+# ECFP templates and the applicability criterion of the companion rule-set paper
+# (under review) are no longer comparable.
 
 channels:
   - conda-forge
