@@ -8,7 +8,7 @@ Serves two roles at once, and the distinction matters for the paper:
 - **tool** exposed to the LLM agent. The tooled/untooled ablation of the project
   note is exactly "does the agent get to call this or not".
 
-Simplification against the RetroMorgan draft
+Simplification against the earlier prototype
 --------------------------------------------
 There, a node was a *sum* of ECFP vectors, so closeness required greedily
 selecting `nfrag` building blocks whose sum best matched the node
@@ -29,7 +29,7 @@ def counted_tanimoto(v: np.ndarray, matrix: np.ndarray) -> np.ndarray:
 
         T(u, v) = <u,v> / (<u,u> + <v,v> - <u,v>)
 
-    Same definition as `retromorgan.scoring_function.tani_counts`, batched.
+    Same definition as the prototype's `tani_counts` scoring function, batched.
     """
     v = np.asarray(v, dtype=np.float32)
     m = np.asarray(matrix, dtype=np.float32)

@@ -1,6 +1,7 @@
 """Sparse O(d) reaction-center prefilter.
 
-Criterion (Meyer et al. 2026, Eq. 8): a reaction is ECFP-applicable to a molecular
+Criterion (companion rule-set paper, under review, Eq. 8): a reaction is
+ECFP-applicable to a molecular
 vector ``v`` when
 
     ECFP_rc,h(r) + v >= 0    coordinate-wise.

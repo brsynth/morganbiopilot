@@ -8,7 +8,8 @@ stereochemistry, isotopes, charge and protonation state.
 
 This is the right key here for two independent reasons:
 
-- the whole framework works on flattened, stereo-free graphs (Meyer et al. 2026),
+- the whole framework works on flattened, stereo-free graphs (companion rule-set
+  paper, under review),
   so a stereo-sensitive key would draw distinctions the representation cannot see;
 - sinks and cofactor tables are full of protonation and charge variants of the
   same species (H+ as ``MNXM01``/``MNXM1``, ATP(3-) vs ATP(4-), ...). Matching on

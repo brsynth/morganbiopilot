@@ -11,7 +11,7 @@ Molecules are deduplicated by sanitized SMILES, so the structure is a graph, not
 tree: two branches reaching the same intermediate share it, and solving it once
 solves it everywhere.
 
-Against the RetroMorgan draft
+Against the earlier prototype
 -----------------------------
 That version keyed nodes on ECFP vectors and needed a combinatorial test to decide
 whether a node lay in building-block space (`N_combination.is_N_combination`,

@@ -1,7 +1,7 @@
 """Molecule sanitization and ECFP conventions for the whole project.
 
-Sanitization follows Meyer et al. 2026, "Experimental setup / Molecule
-sanitization": each structure is parsed into a 2D molecular graph and sanitized
+Sanitization follows the companion rule-set paper (under review), "Experimental
+setup / Molecule sanitization": each structure is parsed into a 2D molecular graph and sanitized
 into a canonical RDKit SMILES, wildcard-containing components are removed, and
 each component is flattened to its 2D graph, **omitting stereochemistry**.
 

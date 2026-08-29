@@ -6,7 +6,7 @@ Two reasons, both about `morganrxn.core.reaction_rules.ReactionRules.load()`.
 
 **1. It reads the wrong directory.** It takes no path and resolves through
 ``morganrxn.core.paths.REACTION_RULES_DIR``, i.e. ``<morganrxn repo root>/data``.
-Called from MorganBioPilot it reads the RetroMorgan copy, not ``code/data/``. Both
+Called from MorganBioPilot it reads that package's copy, not ``code/data/``. Both
 copies are currently identical, so the mistake is SILENT — until one is
 regenerated. morganrxn is under review elsewhere and must not be modified, so we
 reimplement path resolution here.

@@ -10,7 +10,7 @@ engine and differ only in search strategy; making `select` the only extension
 point turns that claim into a structural property of the code rather than a
 promise in the paper. The LLM agent is one more implementation of this protocol.
 
-The RetroMorgan draft already had this seam implicitly: its search loop was
+The earlier prototype already had this seam implicitly: its search loop was
 identical across `astar` / `best_first` / `retro_star` / `dfs`, differing only in
 the key used to pop from the frontier. Here that key becomes an object.
 """

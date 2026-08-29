@@ -1,6 +1,7 @@
 """Expansion of a single node: the deterministic primitive of the whole project.
 
-Three stages, following Meyer et al. 2026 and the project note (section 4):
+Three stages, following the companion rule-set paper (under review) and the
+project note (section 4):
 
 1. **Prefilter** the applicable rules with the reaction-center ECFP — O(d),
    necessary condition only (`prefilter.py`).
