@@ -81,6 +81,11 @@
   .arrow { color: var(--muted); }
   .ec { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px;
         background: var(--line); color: var(--muted); margin-left: 6px; }
+  /* Distance from the target, per step. A route's steps are printed deepest first,
+     so this column reads as the level each reaction sits on. */
+  .depth { display: inline-block; min-width: 26px; font-size: 11px; color: var(--muted);
+           margin-right: 6px; }
+  .route header span { font-size: 12px; color: var(--muted); }
   .chassis { margin-top: 10px; font-size: 13px; }
   .chassis b { font-weight: 600; }
   .pill { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px;
@@ -102,34 +107,31 @@
     <label for="smiles">Target SMILES</label>
     <textarea id="smiles" spellcheck="false">O=Cc1ccc(O)c(OC)c1</textarea>
 
+    <!-- Every option below is filled from /api/presets. Writing them here as well is
+         what let the page go on offering policies the server had deleted. -->
     <label for="policy">Search policy</label>
-    <select id="policy">
-      <option value="bfs">bfs — breadth first</option>
-      <option value="dfs">dfs — depth first</option>
-      <option value="greedy">greedy — closest to the chassis</option>
-      <option value="greedy_similarity">greedy — best-precedented disconnection</option>
-      <option value="mcts" selected>mcts — UCT on sink closeness</option>
-      <option value="random">random</option>
-      <option value="llm">llm — language-model policy</option>
-    </select>
+    <select id="policy"></select>
 
-    <div id="modelWrap" style="display:none">
+    <div id="llmWrap" style="display:none">
+      <label for="tooling">Grounding shown to the agent</label>
+      <select id="tooling"></select>
       <label for="model">Model</label>
       <input id="model" value="openai:Qwen/Qwen2.5-7B-Instruct" spellcheck="false">
-      <div class="hint">Needs a served model and OPENAI_BASE_URL in the server's env.</div>
+      <div class="hint">Needs a served model and OPENAI_BASE_URL in the server's env.
+        Anthropic specs (<code>anthropic:claude-opus-5</code>, or a bare model name)
+        read the effort below; other providers ignore it.</div>
+      <label for="effort">Reasoning effort</label>
+      <select id="effort">
+        <option value="low">low</option>
+        <option value="medium" selected>medium</option>
+        <option value="high">high</option>
+      </select>
     </div>
 
     <div class="row">
       <div>
         <label for="radius">ECFP radius</label>
-        <select id="radius">
-          <option value="0">r0 — most general</option>
-          <option value="1">r1</option>
-          <option value="2" selected>r2</option>
-          <option value="3">r3</option>
-          <option value="4">r4</option>
-          <option value="5">r5 — most specific</option>
-        </select>
+        <select id="radius"></select>
       </div>
       <div>
         <label for="budget">Budget</label>
@@ -155,10 +157,27 @@
     <div id="topnWrap">
       <label for="topn">Candidates kept per expansion</label>
       <input id="topn" type="number" value="20" min="1" max="500">
+      <label for="ranker">Ranker</label>
+      <select id="ranker"></select>
       <div class="hint">Ordered by similarity to the substrate each rule was learned
         on. Uncapped at r1, violacein yields 96 precursor sets and the frontier passes
         15,000 nodes; UCT then never leaves depth 1.</div>
     </div>
+
+    <div class="row">
+      <div>
+        <label for="viewtopk">Frontier shown</label>
+        <input id="viewtopk" type="number" value="0" min="0" max="200">
+      </div>
+      <div>
+        <label for="maxseconds">Time limit (s)</label>
+        <input id="maxseconds" type="number" value="0" min="0" max="3600">
+      </div>
+    </div>
+    <div class="hint">0 leaves both off, as in the published runs. A frontier of k puts
+      every policy under the portfolio view the agent already sees — the matched
+      control — and sets the agent's own k. A time limit reports
+      <code>stopped_because=time</code>: a censored run, not a failure to solve.</div>
 
     <div class="check">
       <input type="checkbox" id="requireEc">
@@ -186,27 +205,49 @@
 const $ = (id) => document.getElementById(id);
 let source = null;
 
+// Options are the server's to declare. It knows which policies exist, which toolings
+// `build_surface` handles and which radii have a rule set on disk; a copy here can only
+// go stale, and did.
+function fill(id, items, selected) {
+  const sel = $(id);
+  sel.innerHTML = "";
+  for (const it of items) {
+    const o = document.createElement("option");
+    o.value = it.id; o.textContent = it.label;
+    if (it.id === selected) o.selected = true;
+    sel.appendChild(o);
+  }
+}
+
 fetch("/api/presets").then(r => r.json()).then(d => {
   for (const p of d.presets) {
     const o = document.createElement("option");
     o.value = p.smiles; o.textContent = p.name;
     $("preset").appendChild(o);
   }
+  const def = d.defaults || {};
+  fill("policy", d.policies, def.policy);
+  fill("tooling", d.toolings, def.tooling);
+  fill("ranker", d.rankers, def.ranker);
+  fill("radius", d.radii.map(r => ({
+    id: String(r),
+    label: r === Math.min(...d.radii) ? `r${r} — most general`
+         : r === Math.max(...d.radii) ? `r${r} — most specific`
+         : r === def.radius ? `r${r} — reported configuration` : `r${r}`,
+  })), String(def.radius));
+  $("viewtopk").placeholder = `off; ${def.top_k} matches the agent`;
+  syncPolicy();
 });
 
 $("preset").addEventListener("change", e => {
   if (e.target.value) $("smiles").value = e.target.value;
 });
-$("policy").addEventListener("change", e => {
-  $("modelWrap").style.display = e.target.value === "llm" ? "block" : "none";
-});
+function syncPolicy() {
+  $("llmWrap").style.display = $("policy").value === "llm" ? "block" : "none";
+}
+$("policy").addEventListener("change", syncPolicy);
 $("ranked").addEventListener("change", e => {
   $("topnWrap").style.display = e.target.checked ? "block" : "none";
-  // The similarity policy scores frontier nodes with the same ranker the cap uses;
-  // without it there is nothing to rank on.
-  if (!e.target.checked && $("policy").value === "greedy_similarity") {
-    $("policy").value = "mcts";
-  }
 });
 
 function line(html, cls) {
@@ -232,20 +273,54 @@ function setStats(items) {
 function renderRoutes(d) {
   const box = $("results");
   if (!d.solved) {
+    // A run cut by the clock has not failed to solve; it was never allowed to finish,
+    // and reading it as evidence about the target would be wrong.
+    const why = d.stopped_because === "time"
+      ? `the time limit fired before the budget was spent — this run is censored,
+         not unsolved`
+      : `A lower radius or a larger budget are the two levers.`;
     box.innerHTML = `<h2>Result</h2><p class="muted">No route to the chassis was found
       (${esc(d.stopped_because)}). The graph reached ${d.n_molecules} molecules.
-      A lower radius or a larger budget are the two levers.</p>`;
+      ${why}</p>`;
     return;
   }
-  let html = `<h2>Routes found (${d.routes.length} shown)</h2>`;
+  // A route is an AND-tree, not a chain: `n_steps` counts every branch. The longest
+  // chain from the chassis to the target is what "how long is the pathway" means, and
+  // the two differ by a lot on a convergent route -- so both are shown, always.
+  //
+  // Computed by walking substrate -> precursors from the target. NOT from `step.depth`,
+  // which is the molecule's depth in the search GRAPH -- a minimum over every path that
+  // reached it (graph.py, `node.depth = min(node.depth, depth)`), not its position in
+  // this route. Reading the tree height off it understates a route that revisits a
+  // molecule the search first found closer to the target.
+  function routeDepth(r) {
+    const made = new Map();          // substrate -> precursors that make it
+    for (const s of r.steps) made.set(s.substrate, s.precursors);
+    const height = (smi, seen) => {
+      const pre = made.get(smi);
+      if (!pre || seen.has(smi)) return 0;   // chassis leaf, or a cycle
+      const next = new Set(seen); next.add(smi);
+      return 1 + Math.max(0, ...pre.map(p => height(p, next)));
+    };
+    return height(r.target, new Set());
+  }
+
+  let html = `<h2>Routes found (${d.routes.length} shown, shortest first)</h2>`;
   for (const r of d.routes) {
+    const depth = routeDepth(r);
+    // Distinct (substrate, precursors) pairs: a molecule reachable through two
+    // branches has its sub-route concatenated into both, so the same reaction can be
+    // counted twice by `n_steps`. Only the distinct ones are enzymes to introduce.
+    const enzymes = new Set(r.steps.map(s => s.substrate + ">>" + s.precursors.join("+"))).size;
     html += `<div class="route"><header><h3>${r.n_steps} enzymatic step${r.n_steps > 1 ? "s" : ""}</h3>
+      <span>depth ${depth} — longest chain from the chassis</span>
+      <span title="depth of this molecule in the search graph, not its position in this route">graph levels touched: ${1 + Math.max(0, ...r.steps.map(s => s.depth))}</span>
       <span>${Math.round(r.ec_coverage * 100)}% of steps have a known EC</span></header>`;
     for (const s of r.steps) {
       const ec = s.ec_numbers && s.ec_numbers.length
         ? `<span class="ec">EC ${esc(s.ec_numbers.slice(0, 3).join(", "))}</span>` : "";
       html += `<div class="step">
-        <div class="smi">${s.precursors.map(esc).join(" <span class='arrow'>+</span> ")}</div>
+        <div class="smi"><span class="depth" title="depth of this molecule in the search graph: its shortest distance to the target, over every path that reached it">g${s.depth}</span>${s.precursors.map(esc).join(" <span class='arrow'>+</span> ")}</div>
         <div class="smi"><span class="arrow">→</span> ${esc(s.substrate)}${ec}</div>`;
       if (s.cofactors && s.cofactors.length) {
         html += `<div class="muted" style="font-size:12px">cofactors: ${s.cofactors.map(esc).join(", ")}</div>`;
@@ -257,7 +332,8 @@ function renderRoutes(d) {
         r.leaves.map(l => `<span class="pill">${esc(l.label)}</span>`).join("") + `</div>`;
     }
     html += `<div class="muted" style="font-size:12px;margin-top:8px">
-      ${r.n_steps} heterologous enzyme${r.n_steps > 1 ? "s" : ""} to introduce</div></div>`;
+      ${enzymes} distinct heterologous enzyme${enzymes > 1 ? "s" : ""} to introduce,
+      over ${r.n_steps} step${r.n_steps > 1 ? "s" : ""} and ${depth} level${depth > 1 ? "s" : ""}</div></div>`;
   }
   box.innerHTML = html;
 }
@@ -274,7 +350,9 @@ $("f").addEventListener("submit", async (e) => {
   const body = {
     smiles: $("smiles").value,
     policy: $("policy").value,
+    tooling: $("tooling").value,
     model: $("model").value,
+    effort: $("effort").value,
     radius: +$("radius").value,
     budget: +$("budget").value,
     max_depth: +$("depth").value,
@@ -283,6 +361,9 @@ $("f").addEventListener("submit", async (e) => {
     exhaustive: $("exhaustive").checked,
     ranked: $("ranked").checked,
     top_n: +$("topn").value,
+    ranker: $("ranker").value,
+    view_top_k: +$("viewtopk").value,
+    max_seconds: +$("maxseconds").value,
   };
   const res = await fetch("/api/search", {
     method: "POST", headers: {"Content-Type": "application/json"},
@@ -308,6 +389,9 @@ $("f").addEventListener("submit", async (e) => {
     } else if (d.type === "done") {
       setStats([
         [d.solved ? "yes" : "no", "solved"],
+        // Computed by graph.shortest_route(), which is exact and needs no route
+        // enumeration -- unlike the step counts below it, which include branches.
+        [d.shortest_pathway == null ? "—" : d.shortest_pathway, "shortest route"],
         [d.n_expansions, "expansions"],
         [d.n_molecules, "molecules built"],
         [d.n_reactions, "reactions"],
