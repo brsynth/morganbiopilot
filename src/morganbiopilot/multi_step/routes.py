@@ -112,6 +112,62 @@ def _labels() -> Dict[str, str]:
     return out
 
 
+def route_from_reactions(graph: SearchGraph, rxn_ids, target: str,
+                         rule_ec=None) -> Route:
+    """One `Route` from a list of reaction-node ids, as `graph.pathways` produces them.
+
+    Split out of `extract_routes` so that any other list of reaction ids over the same
+    graph can be resolved the same way -- `graph.shortest_route()` in particular, which
+    returns exactly this shape and is the only exact answer to "the shortest route".
+    The enumeration cannot supply it: `pathways` walks children in insertion order and
+    truncates, so on a violacein search whose shortest route is 4 reactions, all 16
+    routes it returned were chains of 30 to 48.
+    """
+    labels = _labels()
+    steps, leaves, cofactor_leaves = [], [], []
+    molecules_in_route = set()
+
+    for rxn_id in rxn_ids:
+        rxn = graph.reactions[rxn_id]
+        parent = graph.molecules[rxn.parent]
+        precursors = tuple(graph.molecules[c].smiles for c in rxn.children)
+        molecules_in_route.add(parent.smiles)
+        molecules_in_route.update(precursors)
+
+        # The neighbour's annotation first: `expand` folds every template that
+        # reaches the same molecule set into one node and merges their EC, so
+        # `rule_ec[rxn.rule_idx]` would report only the representative rule's and
+        # call a step unannotated when a folded-in template carries the enzyme.
+        ec = tuple(rxn.neighbour.ec_numbers)
+        if not ec and rule_ec is not None:
+            ec = tuple(rule_ec.ec[rxn.rule_idx])
+
+        steps.append(RouteStep(
+            depth=parent.depth,
+            substrate=parent.smiles,
+            precursors=precursors,
+            rule_idx=rxn.rule_idx,
+            reaction_id=str(rxn.neighbour.reaction_id),
+            ec_numbers=ec,
+            cofactors=tuple(rxn.neighbour.cofactors_removed),
+            template=rxn.neighbour.template,
+        ))
+
+    # Leaves: molecules in the route that terminate a branch.
+    for smiles in sorted(molecules_in_route):
+        node_id = graph.molecule_id(smiles)
+        if node_id is None:
+            continue
+        node = graph.molecules[node_id]
+        if node.in_sink:
+            leaves.append((smiles, labels.get(skeleton(smiles) or "", smiles)))
+        elif node.is_cofactor:
+            cofactor_leaves.append(smiles)
+
+    return Route(target=target, steps=tuple(steps), leaves=tuple(leaves),
+                 cofactor_leaves=tuple(cofactor_leaves))
+
+
 def extract_routes(result, rule_ec=None, max_routes: int = 20,
                    max_pathways: int = 256) -> List[Route]:
     """Resolve a `SearchResult`'s solved pathways into `Route` objects.
@@ -120,58 +176,15 @@ def extract_routes(result, rule_ec=None, max_routes: int = 20,
     is forwarded to `SearchGraph.pathways`. They are separate because top-k route
     recovery needs a wide enumeration and only then a cap, whereas the per-run tables
     need two or three routes and should not pay for the cartesian product.
+
+    **This does not return the shortest route**, and cannot be made to cheaply: the
+    enumeration is a truncated cartesian product, not a search. Use
+    `graph.shortest_route()` with `route_from_reactions` when the shortest one is what
+    is wanted.
     """
     graph: SearchGraph = result.graph
-    labels = _labels()
-    routes: List[Route] = []
-
-    for rxn_ids in graph.pathways(max_routes=max_pathways)[:max_routes]:
-        steps, leaves, cofactor_leaves = [], [], []
-        molecules_in_route = set()
-
-        for rxn_id in rxn_ids:
-            rxn = graph.reactions[rxn_id]
-            parent = graph.molecules[rxn.parent]
-            precursors = tuple(graph.molecules[c].smiles for c in rxn.children)
-            molecules_in_route.add(parent.smiles)
-            molecules_in_route.update(precursors)
-
-            # The neighbour's annotation first: `expand` folds every template that
-            # reaches the same molecule set into one node and merges their EC, so
-            # `rule_ec[rxn.rule_idx]` would report only the representative rule's and
-            # call a step unannotated when a folded-in template carries the enzyme.
-            ec = tuple(rxn.neighbour.ec_numbers)
-            if not ec and rule_ec is not None:
-                ec = tuple(rule_ec.ec[rxn.rule_idx])
-
-            steps.append(RouteStep(
-                depth=parent.depth,
-                substrate=parent.smiles,
-                precursors=precursors,
-                rule_idx=rxn.rule_idx,
-                reaction_id=str(rxn.neighbour.reaction_id),
-                ec_numbers=ec,
-                cofactors=tuple(rxn.neighbour.cofactors_removed),
-                template=rxn.neighbour.template,
-            ))
-
-        # Leaves: molecules in the route that terminate a branch.
-        for smiles in sorted(molecules_in_route):
-            node_id = graph.molecule_id(smiles)
-            if node_id is None:
-                continue
-            node = graph.molecules[node_id]
-            if node.in_sink:
-                leaves.append((smiles, labels.get(skeleton(smiles) or "", smiles)))
-            elif node.is_cofactor:
-                cofactor_leaves.append(smiles)
-
-        routes.append(Route(
-            target=result.target, steps=tuple(steps),
-            leaves=tuple(leaves), cofactor_leaves=tuple(cofactor_leaves),
-        ))
-
-    return routes
+    return [route_from_reactions(graph, rxn_ids, result.target, rule_ec)
+            for rxn_ids in graph.pathways(max_routes=max_pathways)[:max_routes]]
 
 
 def save_routes(routes: List[Route], path: Path, meta: Optional[dict] = None) -> None:
