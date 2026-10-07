@@ -1,0 +1,7 @@
+# Shell and SLURM scripts must reach the cluster with UNIX line endings. Written
+# on Windows they get CRLF, and sbatch rejects the file outright:
+#   "Batch script contains DOS line breaks (\r\n) instead of expected UNIX (\n)"
+# Python tolerates CRLF, so the failure only shows up on the scripts, and only
+# after a sync.
+*.slurm text eol=lf
+*.sh    text eol=lf

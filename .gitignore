@@ -23,3 +23,6 @@ __pycache__/
 
 .vscode/
 .DS_Store
+
+# Local assistant notes: machine-specific paths and internal instructions.
+CLAUDE.md
