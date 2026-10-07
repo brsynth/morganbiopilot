@@ -86,6 +86,44 @@
   .depth { display: inline-block; min-width: 26px; font-size: 11px; color: var(--muted);
            margin-right: 6px; }
   .route header span { font-size: 12px; color: var(--muted); }
+  /* The AND-OR tree. Target on top, one row of precursors per reaction, down to the
+     chassis. Laid out with nested flex rather than computed SVG coordinates: the depth
+     and the branching factor are both unknown until the route arrives, and flex
+     re-flows on its own where a coordinate layout would need a second pass. */
+  .tree { overflow-x: auto; padding: 6px 2px 2px; }
+  .node { display: flex; flex-direction: column; align-items: center; }
+  .mol { background: #fff; border: 1px solid var(--line); border-radius: 8px;
+         padding: 4px; display: flex; flex-direction: column; align-items: center; }
+  .mol.sink { border-color: var(--ok); border-width: 2px; }
+  .mol.cof { opacity: .65; }
+  .mol.seen { border-style: dashed; }
+  .mol img, .mol svg { display: block; }
+  .mol .noimg { padding: 6px; font-family: var(--mono); font-size: 9px;
+                color: #444; word-break: break-all; text-align: center; }
+  .cap { font-size: 11px; color: #444; text-align: center;
+         padding: 2px 4px 1px; word-break: break-all; }
+  .cap b { color: var(--ok); }
+  /* Reaction node: the AND. Its children are all required, which is what the bar over
+     them says -- an OR would be a choice between them. */
+  .rxn { font-size: 11px; color: var(--muted); border: 1px solid var(--line);
+         border-radius: 999px; padding: 1px 9px; margin: 7px 0 0;
+         background: var(--panel); white-space: nowrap; }
+  /* Rule index and MetaNetX ids. Monospace and dimmer than the EC: they are keys to
+     look something up with, not chemistry to read. */
+  .rid { font-family: var(--mono); font-size: 10px; opacity: .75; }
+  .stem { width: 1px; height: 10px; background: var(--line); }
+  .kids { display: flex; align-items: flex-start; gap: 18px; padding-top: 10px;
+          position: relative; }
+  .kids::before { content: ""; position: absolute; top: 0; left: 0; right: 0;
+                  height: 1px; background: var(--line); }
+  .kids > .node { position: relative; padding-top: 10px; }
+  .kids > .node::before { content: ""; position: absolute; top: -10px; left: 50%;
+                          width: 1px; height: 20px; background: var(--line); }
+  /* A single child needs no bar: it reads as a chain, which is what it is. */
+  .kids.one::before { display: none; }
+  details.flat { margin-top: 10px; }
+  details.flat summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+
   .chassis { margin-top: 10px; font-size: 13px; }
   .chassis b { font-weight: 600; }
   .pill { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px;
@@ -305,6 +343,82 @@ function renderRoutes(d) {
     return height(r.target, new Set());
   }
 
+  // The AND-OR tree, drawn from the target down until every branch ends on a chassis
+  // metabolite. Each molecule has at most one reaction below it -- a route has already
+  // chosen, so the OR is resolved and only the AND survives: the row of precursors
+  // under a reaction are all required together.
+  function tree(r) {
+    const made = new Map();               // substrate -> the step that makes it
+    for (const s of r.steps) if (!made.has(s.substrate)) made.set(s.substrate, s);
+    const labels = new Map((r.leaves || []).map(l => [l.smiles, l.label]));
+    const cofactorLeaf = new Set(r.cofactor_leaves || []);
+    // Cards shrink as the route grows. A 30-step tree at reading size is 6,000 px of
+    // scrolling in both directions, which is not a picture of anything; small cards
+    // still show the scaffold and where it changes, and the SMILES is on hover.
+    const W = r.steps.length > 12 ? 96 : r.steps.length > 6 ? 130 : 170;
+    const H = Math.round(W * 0.78);
+
+    function mol(smi, cls, caption) {
+      // The depiction is fetched per molecule; a failure falls back to the SMILES
+      // rather than to a broken-image glyph (the endpoint 404s when RDKit cannot draw).
+      const src = `/api/depict?smi=${encodeURIComponent(smi)}&w=${W}&h=${H}`;
+      const sz = `width:${W}px;height:${H}px`;
+      return `<div class="mol ${cls}" title="${esc(smi)}">
+        <img src="${src}" alt="" loading="lazy" style="${sz}"
+             onerror="this.outerHTML='&lt;div class=\\'noimg\\' style=&quot;width:${W}px&quot;&gt;${esc(smi).replace(/'/g, "&#39;")}&lt;/div&gt;'">
+        <div class="cap" style="max-width:${W}px">${caption}</div></div>`;
+    }
+
+    function node(smi, seen) {
+      const step = made.get(smi);
+      if (!step || seen.has(smi)) {
+        // A leaf: chassis metabolite, cofactor, or -- with `seen` -- a molecule already
+        // standing above us on this branch, which a route can revisit.
+        const label = labels.get(smi);
+        const cls = label ? "sink" : cofactorLeaf.has(smi) ? "cof"
+                  : seen.has(smi) ? "seen" : "";
+        const cap = label ? `<b>${esc(label)}</b>`
+                  : seen.has(smi) ? "already above on this branch"
+                  : cofactorLeaf.has(smi) ? "cofactor" : "not reached";
+        return `<div class="node">${mol(smi, cls, cap)}</div>`;
+      }
+      const next = new Set(seen); next.add(smi);
+      const ec = step.ec_numbers && step.ec_numbers.length
+        ? `EC ${esc(step.ec_numbers.slice(0, 2).join(", "))}` : "EC —";
+      const cof = step.cofactors && step.cofactors.length
+        ? ` + ${step.cofactors.length} cofactor${step.cofactors.length > 1 ? "s" : ""}` : "";
+
+      // Which rule fired, and which MetaNetX reactions it was learned from. `rule_idx`
+      // indexes the RuleSet, so it is what you pass to the engine to look the template
+      // up; `reaction_id` is a '|'-separated list because expand() folds every template
+      // reaching the same precursor set into one node. The `__splitN` suffix is an
+      // artefact of rule derivation and is not a key in the reaction table -- stripped
+      // here for the same reason `ranking.NativeSimilarity` strips it to join.
+      const rxnIds = (step.reaction_id || "").split("|")
+        .map(x => x.replace(/__split\d+$/, "")).filter(Boolean);
+      const ids = rxnIds.length
+        ? ` · ${esc(rxnIds[0])}${rxnIds.length > 1 ? ` +${rxnIds.length - 1}` : ""}` : "";
+      const rule = Number.isInteger(step.rule_idx) ? ` · rule ${step.rule_idx}` : "";
+      const tip = [
+        step.ec_numbers && step.ec_numbers.length
+          ? `EC ${step.ec_numbers.join(", ")}` : "no EC annotation",
+        Number.isInteger(step.rule_idx) ? `rule index ${step.rule_idx}` : "",
+        rxnIds.length ? `MetaNetX: ${rxnIds.join(", ")}` : "",
+        (step.cofactors || []).length ? `cofactors: ${step.cofactors.join(", ")}` : "",
+      ].filter(Boolean).join("\n");
+
+      const kids = step.precursors.map(p => node(p, next)).join("");
+      const label = labels.get(smi);
+      return `<div class="node">
+        ${mol(smi, label ? "sink" : "", label ? `<b>${esc(label)}</b>` : "")}
+        <div class="rxn" title="${esc(tip)}">${ec}${cof}<span class="rid">${rule}${ids}</span></div>
+        <div class="stem"></div>
+        <div class="kids ${step.precursors.length === 1 ? "one" : ""}">${kids}</div>
+      </div>`;
+    }
+    return node(r.target, new Set());
+  }
+
   let html = `<h2>Routes found (${d.routes.length} shown, shortest first)</h2>`;
   for (const r of d.routes) {
     const depth = routeDepth(r);
@@ -316,6 +430,12 @@ function renderRoutes(d) {
       <span>depth ${depth} — longest chain from the chassis</span>
       <span title="depth of this molecule in the search graph, not its position in this route">graph levels touched: ${1 + Math.max(0, ...r.steps.map(s => s.depth))}</span>
       <span>${Math.round(r.ec_coverage * 100)}% of steps have a known EC</span></header>`;
+
+    html += `<div class="tree">${tree(r)}</div>`;
+
+    // The flat list is what this used to be. Kept, folded away: it is the form you
+    // copy a SMILES out of, and the tree is the form you read.
+    html += `<details class="flat"><summary>the same route as a list of steps</summary>`;
     for (const s of r.steps) {
       const ec = s.ec_numbers && s.ec_numbers.length
         ? `<span class="ec">EC ${esc(s.ec_numbers.slice(0, 3).join(", "))}</span>` : "";
@@ -325,8 +445,16 @@ function renderRoutes(d) {
       if (s.cofactors && s.cofactors.length) {
         html += `<div class="muted" style="font-size:12px">cofactors: ${s.cofactors.map(esc).join(", ")}</div>`;
       }
+      // The list is the form you copy an identifier out of, so it carries them in full
+      // rather than the tree's abbreviated "+3".
+      const ids = (s.reaction_id || "").split("|")
+        .map(x => x.replace(/__split\d+$/, "")).filter(Boolean);
+      html += `<div class="muted rid" style="font-size:11px">rule ${s.rule_idx}${
+        ids.length ? " · " + esc(ids.join(", ")) : ""}</div>`;
       html += `</div>`;
     }
+    html += `</details>`;
+
     if (r.leaves && r.leaves.length) {
       html += `<div class="chassis"><b>From the chassis:</b><br>` +
         r.leaves.map(l => `<span class="pill">${esc(l.label)}</span>`).join("") + `</div>`;

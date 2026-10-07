@@ -39,6 +39,7 @@ import threading
 import traceback
 import uuid
 from dataclasses import dataclass, field
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -242,7 +243,7 @@ def run_search(run: Run, params: dict) -> None:
     """The search thread. Every exit path must emit a terminal event."""
     from morganbiopilot.agents.state import DEFAULT_TOP_K
     from morganbiopilot.core.chem import AVAILABLE_RADII, sanitize, split_components
-    from morganbiopilot.multi_step.routes import extract_routes
+    from morganbiopilot.multi_step.routes import extract_routes, route_from_reactions
     from morganbiopilot.multi_step.search import search
     from morganbiopilot.one_step.expand import expand
 
@@ -375,6 +376,21 @@ def run_search(run: Run, params: dict) -> None:
         # AND node appears under another AND node.
         routes = (extract_routes(result, rule_ec, max_routes=16, max_pathways=256)
                   if result.solved else [])
+
+        # The enumeration does not contain the shortest route and cannot be asked for
+        # it: `pathways` walks children in insertion order and truncates. On violacein
+        # the exact shortest is 4 reactions while every one of the 16 enumerated routes
+        # was a chain of 30 to 48, so the page was showing the search at its worst and
+        # hiding its best result. `shortest_route` is a relaxation over the graph --
+        # exact, and cheaper than the enumeration it corrects.
+        if result.solved:
+            shortest = result.graph.shortest_route()
+            if shortest:
+                best = route_from_reactions(result.graph, shortest, result.target,
+                                            rule_ec)
+                same = lambda r: sorted((s.substrate, s.precursors) for s in r.steps)
+                if all(same(r) != same(best) for r in routes):
+                    routes = [best] + routes[:15]
         # Shortest first, branching only as a tiebreak. It used to be the other way
         # round -- most-branching first, to surface convergent routes -- and on a
         # decorable scaffold that inverted the intent: the AND steps it ranks on are
@@ -436,6 +452,24 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, html, "text/html; charset=utf-8")
         elif path == "/api/presets":
             self._json(options())
+        elif path == "/api/depict":
+            q = parse_qs(urlparse(self.path).query)
+            svg = depict(q.get("smi", [""])[0],
+                         min(int(q.get("w", ["190"])[0]), 600),
+                         min(int(q.get("h", ["150"])[0]), 600))
+            if not svg:
+                # The page falls back to printing the SMILES; a 404 says so without
+                # putting a broken-image glyph in the middle of a route.
+                self._send(404, b"cannot depict", "text/plain")
+            else:
+                # Immutable: the drawing of a SMILES never changes, and a route view
+                # asks for the same cofactors on every render.
+                self.send_response(200)
+                self.send_header("Content-Type", "image/svg+xml")
+                self.send_header("Content-Length", str(len(svg)))
+                self.send_header("Cache-Control", "max-age=86400")
+                self.end_headers()
+                self.wfile.write(svg)
         elif path == "/api/events":
             self.stream_events(parse_qs(urlparse(self.path).query).get("run", [""])[0])
         else:
@@ -497,6 +531,37 @@ class Handler(BaseHTTPRequestHandler):
     def _event(self, event: dict) -> None:
         self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
         self.wfile.flush()
+
+
+@lru_cache(maxsize=4096)
+def depict(smiles: str, width: int, height: int) -> bytes:
+    """One molecule as an SVG depiction, or b"" if RDKit cannot draw it.
+
+    The route view is a tree of molecules, and a tree whose nodes are 200-character
+    SMILES is unreadable -- the octaprenylated violacein intermediates are the whole
+    argument for drawing them. RDKit is already loaded by the engine, so this costs a
+    few milliseconds and nothing in dependencies.
+
+    Cached: the same cofactors and chassis metabolites recur in every route of every
+    run, and the cache is keyed on the SMILES, so panning around a result redraws
+    nothing.
+    """
+    from rdkit import Chem
+    from rdkit.Chem.Draw import rdMolDraw2D
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return b""
+    drawer = rdMolDraw2D.MolDraw2DSVG(width, height)
+    opts = drawer.drawOptions()
+    # Transparent, so the card behind it supplies the background. The card is white in
+    # both themes on purpose: RDKit draws black bonds, and recolouring a whole palette
+    # per theme is a lot of surface for a picture that everyone is used to seeing on
+    # white anyway.
+    opts.clearBackground = False
+    rdMolDraw2D.PrepareAndDrawMolecule(drawer, mol)
+    drawer.FinishDrawing()
+    return drawer.GetDrawingText().encode("utf-8")
 
 
 def presets() -> List[dict]:
